@@ -20,6 +20,10 @@ SOFASCORE_REQUEST_DELAY = 2  # másodperc a kérések között
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
 ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4"
 
+# === Telegram Bot konfiguráció ===
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
 # === TippmixPro konfiguráció (fallback) ===
 TIPPMIXPRO_BASE_URL = "https://www.tippmixpro.hu"
 
