@@ -22,13 +22,21 @@ from src.bot.formatter import (
     format_value_bets,
     split_message,
 )
-from src.config import SUPPORTED_LEAGUES
+from src.config import SUPPORTED_LEAGUES, TELEGRAM_ALLOWED_USERS
 from src.pipeline import PipelineResult, run_prediction_pipeline
 
 logger = logging.getLogger(__name__)
 
 # Cache az utolsó pipeline eredményhez (6 órás cache a pipeline-ban is van)
 _last_result: PipelineResult | None = None
+
+
+def _is_authorized(update: Update) -> bool:
+    """Ellenőrzi, hogy a felhasználó engedélyezett-e."""
+    if not TELEGRAM_ALLOWED_USERS:
+        return True  # Ha nincs lista beállítva, mindenki használhatja
+    user_id = update.effective_user.id
+    return user_id in TELEGRAM_ALLOWED_USERS
 
 
 async def _get_result(competition: str | None = None) -> PipelineResult:
@@ -66,6 +74,9 @@ async def _send_long_message(
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/start parancs."""
+    if not _is_authorized(update):
+        await update.message.reply_text("Nincs hozzáférésed ehhez a bothoz.")
+        return
     text = (
         "*TipMix Prediction Bot* 🤖⚽\n\n"
         "Üdv\\! Ez a bot napi focimeccs elemzéseket küld "
@@ -77,6 +88,9 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/help parancs."""
+    if not _is_authorized(update):
+        await update.message.reply_text("Nincs hozzáférésed ehhez a bothoz.")
+        return
     leagues = "\n".join(
         f"  /{code.lower()} \\- {escape_md(info['name'])}"
         for code, info in SUPPORTED_LEAGUES.items()
@@ -96,6 +110,9 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def today_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/today parancs - napi teljes elemzés."""
+    if not _is_authorized(update):
+        await update.message.reply_text("Nincs hozzáférésed ehhez a bothoz.")
+        return
     await update.message.reply_text("Elemzés folyamatban... ⏳")
 
     try:
@@ -109,6 +126,9 @@ async def today_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def tips_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/tips parancs - szelvényjavaslatok."""
+    if not _is_authorized(update):
+        await update.message.reply_text("Nincs hozzáférésed ehhez a bothoz.")
+        return
     await update.message.reply_text("Szelvények generálása... ⏳")
 
     try:
@@ -122,6 +142,9 @@ async def tips_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def value_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/value parancs - csak value betek."""
+    if not _is_authorized(update):
+        await update.message.reply_text("Nincs hozzáférésed ehhez a bothoz.")
+        return
     await update.message.reply_text("Value betek keresése... ⏳")
 
     try:
@@ -135,6 +158,9 @@ async def value_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def league_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Liga-specifikus elemzés handler (/pl, /bl1, /sa, /pd, /fl1)."""
+    if not _is_authorized(update):
+        await update.message.reply_text("Nincs hozzáférésed ehhez a bothoz.")
+        return
     # Parancs nevéből kiolvassuk a liga kódot
     command = update.message.text.strip("/").split("@")[0].upper()
 

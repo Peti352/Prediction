@@ -23,6 +23,11 @@ ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4"
 # === Telegram Bot konfiguráció ===
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+# Engedélyezett Telegram user ID-k (vesszővel elválasztva)
+TELEGRAM_ALLOWED_USERS: list[int] = [
+    int(x.strip()) for x in os.getenv("TELEGRAM_ALLOWED_USERS", "").split(",")
+    if x.strip().isdigit()
+]
 
 # === TippmixPro konfiguráció (fallback) ===
 TIPPMIXPRO_BASE_URL = "https://www.tippmixpro.hu"
