@@ -60,7 +60,8 @@ def format_daily_report(result: PipelineResult) -> str:
         return escape_md("Nem találtunk mai meccseket az elemzett ligákban.")
 
     lines = [
-        "*TIPMIX PREDICTION SYSTEM*",
+        "*TIPMIX PREDICTION SYSTEM v3*",
+        "*Ensemble: Dixon\\-Coles \\+ ELO \\+ Forma*",
         f"_{escape_md(result.timestamp.strftime('%Y.%m.%d %H:%M'))}_",
         "",
         f"Elemzett meccsek: *{result.total_matches}*",
@@ -211,13 +212,24 @@ def _format_prediction_short(pred: MatchPrediction) -> str:
     d = _fmt_pct(pred.draw_prob)
     a = _fmt_pct(pred.away_win_prob)
 
+    # Minőség jelző
+    quality_emoji = "🟢" if pred.prediction_quality == "magas" else (
+        "🟡" if pred.prediction_quality == "közepes" else "🔴"
+    )
+
     lines = [
-        f"⚽ *{home} vs {away}*",
+        f"⚽ *{home} vs {away}* {quality_emoji}",
         f"   1X2: {h} / {d} / {a}",
         f"   O/U 2\\.5: {_fmt_pct(pred.over25_prob)} / {_fmt_pct(pred.under25_prob)}",
         f"   GG/NG: {_fmt_pct(pred.gg_prob)} / {_fmt_pct(pred.ng_prob)}",
         f"   Tipp: *{tip}*{odds_str}",
     ]
+
+    # ELO info
+    if pred.home_stats and pred.away_stats:
+        home_elo = escape_md(f"{pred.home_stats.elo_rating:.0f}")
+        away_elo = escape_md(f"{pred.away_stats.elo_rating:.0f}")
+        lines.append(f"   ELO: {home_elo} vs {away_elo}")
 
     # Value betek jelölése
     if pred.value_bets:

@@ -1,6 +1,7 @@
 """Rich CLI megjelenítés - szép terminál kimenet a predikciókhoz.
 
-Bővítve O/U összehasonlító táblával (stat% vs odds).
+Bővítve: Ensemble modell részletek, ELO ratingek, H2H elemzés,
+O/U összehasonlító tábla (stat% vs odds).
 """
 
 from rich.console import Console
@@ -20,8 +21,8 @@ def print_header():
     console.print()
     console.print(
         Panel.fit(
-            "[bold cyan]TIPMIX PREDICTION SYSTEM v2[/bold cyan]\n"
-            "[dim]Sofascore + Odds API | Poisson & Stat O/U elemzés[/dim]",
+            "[bold cyan]TIPMIX PREDICTION SYSTEM v3[/bold cyan]\n"
+            "[dim]Ensemble: Dixon-Coles + ELO + Forma | 20 meccs mélyelemzés[/dim]",
             border_style="cyan",
         )
     )
@@ -35,7 +36,7 @@ def print_matches_table(predictions: list[MatchPrediction]):
         return
 
     table = Table(
-        title="Meccsek és Predikciók",
+        title="Meccsek és Predikciók (Ensemble)",
         box=box.ROUNDED,
         show_lines=True,
         title_style="bold white",
@@ -50,6 +51,7 @@ def print_matches_table(predictions: list[MatchPrediction]):
     table.add_column("O/U 3.5", justify="center", min_width=9)
     table.add_column("GG/NG", justify="center", min_width=9)
     table.add_column("Tipp", justify="center", min_width=12)
+    table.add_column("Q", justify="center", min_width=3)
 
     for pred in predictions:
         match_name = f"{pred.home_team}\nvs {pred.away_team}"
@@ -94,6 +96,9 @@ def print_matches_table(predictions: list[MatchPrediction]):
         if pred.recommended_odds > 0:
             tip_text += f"\n[dim]@{pred.recommended_odds:.2f}[/dim]"
 
+        # Minőség jelző
+        q_text = _quality_indicator(pred.prediction_quality)
+
         table.add_row(
             match_name,
             pred.competition or "-",
@@ -105,17 +110,16 @@ def print_matches_table(predictions: list[MatchPrediction]):
             ou35_text,
             gg_text,
             tip_text,
+            q_text,
         )
 
     console.print(table)
+    console.print("[dim]Q = Predikció minőség (M=magas, K=közepes, A=alacsony)[/dim]")
     console.print()
 
 
 def print_ou_comparison_table(predictions: list[MatchPrediction]):
-    """O/U összehasonlító tábla: stat% vs odds összehasonlítás.
-
-    ★ jelöli a value beteket (stat% > implied prob + 5%).
-    """
+    """O/U összehasonlító tábla: stat% vs odds összehasonlítás."""
     if not predictions:
         return
 
@@ -136,7 +140,6 @@ def print_ou_comparison_table(predictions: list[MatchPrediction]):
     table.add_column("Odds", justify="center")
     table.add_column("V", justify="center", min_width=2)
 
-    # Fejléc csoportok
     console.print("[dim]                          O/U 1.5            O/U 2.5            O/U 3.5[/dim]")
 
     for pred in predictions:
@@ -171,7 +174,7 @@ def print_ou_comparison_table(predictions: list[MatchPrediction]):
 
 
 def print_detailed_prediction(pred: MatchPrediction):
-    """Egy meccs részletes predikciója (bővített O/U analízissel)."""
+    """Egy meccs részletes predikciója - ensemble modell részletekkel."""
     title = f"{pred.home_team} vs {pred.away_team}"
 
     lines = []
@@ -183,8 +186,22 @@ def print_detailed_prediction(pred: MatchPrediction):
     )
     lines.append("")
 
-    # 1X2
-    lines.append("[bold]1X2 Valószínűségek:[/bold]")
+    # ELO Ratingek
+    if pred.home_stats and pred.away_stats:
+        home_elo = pred.home_stats.elo_rating
+        away_elo = pred.away_stats.elo_rating
+        elo_diff = home_elo - away_elo
+        elo_color = "green" if elo_diff > 50 else "red" if elo_diff < -50 else "yellow"
+        lines.append(
+            f"[bold]ELO Rating:[/bold] "
+            f"{pred.home_team}: [bold]{home_elo:.0f}[/bold]  |  "
+            f"{pred.away_team}: [bold]{away_elo:.0f}[/bold]  "
+            f"([{elo_color}]{elo_diff:+.0f}[/{elo_color}])"
+        )
+        lines.append("")
+
+    # Ensemble 1X2
+    lines.append("[bold]1X2 Valószínűségek (Ensemble):[/bold]")
     lines.append(
         f"  Hazai (1): [{_prob_color(pred.home_win_prob)}]"
         f"{pred.home_win_prob:.1%}[/{_prob_color(pred.home_win_prob)}]"
@@ -199,8 +216,47 @@ def print_detailed_prediction(pred: MatchPrediction):
     )
     lines.append("")
 
+    # Modell részletek
+    lines.append("[bold]Modell részletek (1X2):[/bold]")
+    lines.append(
+        f"  Dixon-Coles: {pred.poisson_home:.0%} / {pred.poisson_draw:.0%} / {pred.poisson_away:.0%}"
+    )
+    lines.append(
+        f"  ELO:         {pred.elo_home:.0%} / {pred.elo_draw:.0%} / {pred.elo_away:.0%}"
+    )
+    lines.append(
+        f"  Forma:       {pred.form_home:.0%} / {pred.form_draw:.0%} / {pred.form_away:.0%}"
+    )
+
+    agree_color = "green" if pred.model_agreement >= 0.7 else "yellow" if pred.model_agreement >= 0.5 else "red"
+    lines.append(
+        f"  Egyetértés:  [{agree_color}]{pred.model_agreement:.0%}[/{agree_color}]  "
+        f"Minőség: [{agree_color}]{pred.prediction_quality}[/{agree_color}]"
+    )
+    lines.append("")
+
+    # H2H részletek
+    if pred.h2h_data and pred.h2h_data.matches_played > 0:
+        h2h = pred.h2h_data
+        lines.append(f"[bold]Head-to-Head ({h2h.matches_played} meccs):[/bold]")
+        lines.append(
+            f"  {pred.home_team} győzelmek: {h2h.home_wins}  "
+            f"Döntetlen: {h2h.draws}  "
+            f"{pred.away_team} győzelmek: {h2h.away_wins}"
+        )
+        lines.append(
+            f"  H2H gólátlag: {h2h.avg_total_goals:.1f}  "
+            f"Over 2.5: {h2h.over25_rate:.0%}  "
+            f"GG: {h2h.gg_rate:.0%}"
+        )
+        if h2h.recent_trend:
+            lines.append(
+                f"  Utolsó meccsek: {_colorize_form(h2h.recent_trend)}"
+            )
+        lines.append("")
+
     # O/U analízis szekció
-    lines.append("[bold]O/U Analízis (Poisson vs Stat vs Odds):[/bold]")
+    lines.append("[bold]O/U Analízis (Dixon-Coles vs Stat vs Odds):[/bold]")
     odds = pred.match_odds
 
     for label, poisson_over, stat_over, odds_over, odds_under in [
@@ -217,7 +273,7 @@ def print_detailed_prediction(pred: MatchPrediction):
 
         lines.append(
             f"  O/U {label}: "
-            f"Poisson={poisson_over:.0%}  "
+            f"DC={poisson_over:.0%}  "
             f"Stat={stat_str}  "
             f"Odds={odds_str} (implied={implied})"
         )
@@ -236,16 +292,23 @@ def print_detailed_prediction(pred: MatchPrediction):
         lines.append(f"  {score:>5s}  {prob:.1%} {bar}")
     lines.append("")
 
-    # Value bets (Poisson)
+    # Value bets (Ensemble)
     if pred.value_bets:
-        lines.append("[bold green]Value Betek (Poisson):[/bold green]")
+        lines.append("[bold green]Value Betek (Ensemble):[/bold green]")
         for vb in pred.value_bets:
+            quality_str = ""
+            q = vb.get("quality", 1.0)
+            if q >= 0.95:
+                quality_str = " [bold green][ERŐS][/bold green]"
+            elif q >= 0.85:
+                quality_str = " [yellow][KÖZEPES][/yellow]"
             lines.append(
                 f"  [green]★[/green] {vb['market']}: "
                 f"saját={vb['our_prob']:.1%}, "
                 f"odds={vb['odds']:.2f} "
                 f"(implied={vb['implied_prob']:.1%}), "
                 f"edge=[bold green]+{vb['edge']:.1%}[/bold green]"
+                f"{quality_str}"
             )
 
     # Stat Value bets
@@ -260,29 +323,60 @@ def print_detailed_prediction(pred: MatchPrediction):
                 f"edge=[bold yellow]+{svb['edge']:.1%}[/bold yellow]"
             )
 
-    # Forma
+    # Forma - bővített
     if pred.home_stats:
         hs = pred.home_stats
         lines.append("")
-        lines.append(f"[bold]{pred.home_team} forma:[/bold] "
-                     f"{_colorize_form(hs.form_string)} "
-                     f"(Pos: {hs.league_position}, Gól avg: {hs.avg_goals_scored:.1f})")
+        lines.append(f"[bold]{pred.home_team}:[/bold]")
         lines.append(
-            f"  O/U ráták: 1.5={hs.over15_rate:.0%}  "
+            f"  Forma (20): {_colorize_form(hs.form_string)}  "
+            f"Utolsó 5: {_colorize_form(hs.recent_form_5)}"
+        )
+        lines.append(
+            f"  ELO: {hs.elo_rating:.0f}  "
+            f"Pos: {hs.league_position}  "
+            f"Gól avg: {hs.avg_goals_scored:.1f} (súlyozott: {hs.weighted_avg_goals_scored:.1f})"
+        )
+        lines.append(
+            f"  O/U: 1.5={hs.over15_rate:.0%}  "
             f"2.5={hs.over25_rate:.0%}  "
             f"3.5={hs.over35_rate:.0%}  "
-            f"GG={hs.gg_rate:.0%}"
+            f"GG={hs.gg_rate:.0%}  "
+            f"CS={hs.clean_sheet_rate:.0%}"
         )
+        trend_str = f"[green]+{hs.goal_diff_trend:.1f}[/green]" if hs.goal_diff_trend > 0 else (
+            f"[red]{hs.goal_diff_trend:.1f}[/red]" if hs.goal_diff_trend < 0 else "0.0"
+        )
+        lines.append(
+            f"  Trend: {trend_str}  "
+            f"Konzisztencia: {hs.scoring_consistency:.2f}"
+        )
+
     if pred.away_stats:
         as_ = pred.away_stats
-        lines.append(f"[bold]{pred.away_team} forma:[/bold] "
-                     f"{_colorize_form(as_.form_string)} "
-                     f"(Pos: {as_.league_position}, Gól avg: {as_.avg_goals_scored:.1f})")
+        lines.append(f"[bold]{pred.away_team}:[/bold]")
         lines.append(
-            f"  O/U ráták: 1.5={as_.over15_rate:.0%}  "
+            f"  Forma (20): {_colorize_form(as_.form_string)}  "
+            f"Utolsó 5: {_colorize_form(as_.recent_form_5)}"
+        )
+        lines.append(
+            f"  ELO: {as_.elo_rating:.0f}  "
+            f"Pos: {as_.league_position}  "
+            f"Gól avg: {as_.avg_goals_scored:.1f} (súlyozott: {as_.weighted_avg_goals_scored:.1f})"
+        )
+        lines.append(
+            f"  O/U: 1.5={as_.over15_rate:.0%}  "
             f"2.5={as_.over25_rate:.0%}  "
             f"3.5={as_.over35_rate:.0%}  "
-            f"GG={as_.gg_rate:.0%}"
+            f"GG={as_.gg_rate:.0%}  "
+            f"CS={as_.clean_sheet_rate:.0%}"
+        )
+        trend_str = f"[green]+{as_.goal_diff_trend:.1f}[/green]" if as_.goal_diff_trend > 0 else (
+            f"[red]{as_.goal_diff_trend:.1f}[/red]" if as_.goal_diff_trend < 0 else "0.0"
+        )
+        lines.append(
+            f"  Trend: {trend_str}  "
+            f"Konzisztencia: {as_.scoring_consistency:.2f}"
         )
 
     console.print(Panel(
@@ -362,7 +456,7 @@ def _print_single_ticket(ticket: Ticket):
 
 
 def print_summary(predictions: list[MatchPrediction], tickets: list[Ticket]):
-    """Összefoglaló."""
+    """Összefoglaló - bővített."""
     console.print(Panel.fit(
         "[bold]ÖSSZEFOGLALÓ[/bold]",
         border_style="white",
@@ -372,11 +466,18 @@ def print_summary(predictions: list[MatchPrediction], tickets: list[Ticket]):
     value_bets = sum(len(p.value_bets) for p in predictions)
     stat_value_bets = sum(len(p.stat_value_bets) for p in predictions)
     high_conf = sum(1 for p in predictions if p.confidence >= 0.65)
+    high_quality = sum(1 for p in predictions if p.prediction_quality == "magas")
+    avg_agreement = (
+        sum(p.model_agreement for p in predictions) / total_matches
+        if total_matches > 0 else 0
+    )
 
     console.print(f"  Elemzett meccsek: [bold]{total_matches}[/bold]")
-    console.print(f"  Value bet lehetőségek (Poisson): [bold green]{value_bets}[/bold green]")
+    console.print(f"  Value bet lehetőségek (Ensemble): [bold green]{value_bets}[/bold green]")
     console.print(f"  Stat value bet lehetőségek: [bold yellow]{stat_value_bets}[/bold yellow]")
     console.print(f"  Magas konfidenciájú tippek: [bold]{high_conf}[/bold]")
+    console.print(f"  Magas minőségű predikciók: [bold green]{high_quality}[/bold green]")
+    console.print(f"  Átlagos modell egyetértés: [bold]{avg_agreement:.0%}[/bold]")
     console.print(f"  Generált szelvények: [bold]{len(tickets)}[/bold]")
 
     if tickets:
@@ -437,10 +538,20 @@ def _colorize_form(form: str) -> str:
 
 
 def _value_marker(stat_prob: float, market_odds: float) -> str:
-    """★ jelölés ha value bet (stat% > implied prob + 5%)."""
+    """Value marker ha value bet (stat% > implied prob + 5%)."""
     if market_odds <= 1.0 or stat_prob <= 0:
         return ""
     implied = 1.0 / market_odds
     if stat_prob - implied > 0.05:
         return "[bold green]★[/bold green]"
     return ""
+
+
+def _quality_indicator(quality: str) -> str:
+    """Predikció minőség jelző."""
+    if quality == "magas":
+        return "[bold green]M[/bold green]"
+    elif quality == "közepes":
+        return "[yellow]K[/yellow]"
+    else:
+        return "[red]A[/red]"

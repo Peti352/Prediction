@@ -4,10 +4,17 @@ A Sofascore nyilvános API-ját használja:
 - Mai meccsek lekérdezése (szűrés támogatott ligákra)
 - Csapat utolsó N meccsének lekérdezése (gólstatisztikák)
 - Csapat keresés név alapján
+
+Cloud szerveren (Railway) a Sofascore blokkolhat, ezért:
+- cloudscraper elsődleges használata
+- Több User-Agent rotálás
+- Részletes hiba logolás
 """
 
 import hashlib
 import json
+import logging
+import random
 import time
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +36,18 @@ from src.config import (
     USER_AGENT,
 )
 
+logger = logging.getLogger(__name__)
+
+# User-Agent rotálás a blokkolás elkerülésére
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
+]
+
 
 class SofascoreClient:
     """Sofascore API kliens meccsekhez és statisztikákhoz."""
@@ -36,21 +55,39 @@ class SofascoreClient:
     def __init__(self):
         self._session = requests.Session()
         self._session.headers.update({
-            "User-Agent": USER_AGENT,
+            "User-Agent": random.choice(_USER_AGENTS),
             "Referer": "https://www.sofascore.com/",
-            "Accept": "application/json",
-            "Accept-Language": "en-US,en;q=0.9",
+            "Origin": "https://www.sofascore.com",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9,hu;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Cache-Control": "no-cache",
+            "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
         })
         self._cloud_session = None
         self._last_request_time = 0.0
+        self._use_cloudscraper_first = True  # Cloud szervereken fontos
 
     def _get_cloud_session(self):
-        """Cloudscraper session 403 fallback-hez."""
+        """Cloudscraper session - elsődleges cloud szervereken."""
         if self._cloud_session is None and cloudscraper:
-            self._cloud_session = cloudscraper.create_scraper()
+            self._cloud_session = cloudscraper.create_scraper(
+                browser={
+                    "browser": "chrome",
+                    "platform": "windows",
+                    "desktop": True,
+                }
+            )
             self._cloud_session.headers.update({
                 "Referer": "https://www.sofascore.com/",
-                "Accept": "application/json",
+                "Origin": "https://www.sofascore.com",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
             })
         return self._cloud_session
 
@@ -91,7 +128,11 @@ class SofascoreClient:
     def _request(self, url: str, use_cache: bool = True) -> dict | None:
         """HTTP GET kérés rate limit-tel és cache-sel.
 
-        Ha 403-at kap, cloudscraper-rel próbálja újra.
+        Stratégia:
+        1. Cache ellenőrzés
+        2. Cloudscraper (elsődleges - cloud szerveren fontos)
+        3. Requests fallback
+        4. Részletes hiba logolás
         """
         cache_key = self._cache_key(url)
 
@@ -102,23 +143,48 @@ class SofascoreClient:
 
         self._rate_limit()
 
-        try:
-            resp = self._session.get(url, timeout=REQUEST_TIMEOUT)
-            if resp.status_code == 403:
-                # Fallback: cloudscraper
-                cloud = self._get_cloud_session()
-                if cloud:
-                    self._rate_limit()
+        # 1. próba: cloudscraper (jobban működik cloud szervereken)
+        if self._use_cloudscraper_first:
+            cloud = self._get_cloud_session()
+            if cloud:
+                try:
                     resp = cloud.get(url, timeout=REQUEST_TIMEOUT)
+                    logger.debug("Sofascore cloudscraper %s -> %d", url.split("/")[-1], resp.status_code)
+                    if resp.status_code == 200:
+                        try:
+                            data = resp.json()
+                            if use_cache:
+                                self._save_cache(cache_key, data)
+                            return data
+                        except json.JSONDecodeError:
+                            logger.warning("Sofascore JSON decode hiba (cloudscraper): %s", url)
+                    else:
+                        logger.warning("Sofascore cloudscraper %d: %s", resp.status_code, url)
+                except Exception as e:
+                    logger.warning("Sofascore cloudscraper hiba: %s - %s", type(e).__name__, e)
+
+        # 2. próba: sima requests
+        try:
+            # Rotáljuk a User-Agent-et minden kérésnél
+            self._session.headers["User-Agent"] = random.choice(_USER_AGENTS)
+            resp = self._session.get(url, timeout=REQUEST_TIMEOUT)
+            logger.debug("Sofascore requests %s -> %d", url.split("/")[-1], resp.status_code)
 
             if resp.status_code == 200:
-                data = resp.json()
-                if use_cache:
-                    self._save_cache(cache_key, data)
-                return data
+                try:
+                    data = resp.json()
+                    if use_cache:
+                        self._save_cache(cache_key, data)
+                    return data
+                except json.JSONDecodeError:
+                    logger.warning("Sofascore JSON decode hiba (requests): %s", url)
+            elif resp.status_code == 403:
+                logger.warning("Sofascore 403 Forbidden - valószínűleg IP blokkolás: %s", url)
+            else:
+                logger.warning("Sofascore requests %d: %s", resp.status_code, url)
 
-        except (requests.RequestException, json.JSONDecodeError):
-            pass
+        except requests.RequestException as e:
+            logger.warning("Sofascore requests hiba: %s - %s", type(e).__name__, e)
 
         return None
 
@@ -129,23 +195,24 @@ class SofascoreClient:
             date: Dátum YYYY-MM-DD formátumban. None = ma.
 
         Returns:
-            Támogatott ligák meccsei. Minden elem:
-            {
-                "event_id": int,
-                "home_team": str, "home_team_id": int,
-                "away_team": str, "away_team_id": int,
-                "tournament_id": int, "league_code": str,
-                "league_name": str, "start_timestamp": int,
-            }
+            Támogatott ligák meccsei.
         """
         if date is None:
             date = datetime.now().strftime("%Y-%m-%d")
 
+        logger.info("Sofascore scheduled matches lekérdezés: %s", date)
         url = f"{SOFASCORE_BASE_URL}/sport/football/scheduled-events/{date}"
         data = self._request(url, use_cache=True)
 
-        if not data or "events" not in data:
+        if not data:
+            logger.warning("Sofascore nem válaszolt vagy üres válasz")
             return []
+
+        if "events" not in data:
+            logger.warning("Sofascore válaszban nincs 'events' kulcs. Kulcsok: %s", list(data.keys()))
+            return []
+
+        logger.info("Sofascore összes event: %d", len(data["events"]))
 
         matches = []
         for event in data["events"]:
@@ -173,26 +240,20 @@ class SofascoreClient:
                 "start_timestamp": event.get("startTimestamp", 0),
             })
 
+        logger.info("Támogatott ligák meccsek: %d", len(matches))
         return matches
 
     def get_team_last_n_matches(
-        self, team_id: int, n: int = 10
+        self, team_id: int, n: int = 20
     ) -> list[dict]:
         """Csapat utolsó N befejezett meccsének lekérdezése.
 
         Args:
             team_id: Sofascore csapat ID
-            n: Hány meccset kérünk (max ~20 oldalanként)
+            n: Hány meccset kérünk (alapértelmezett: 20 a mélyelemzéshez)
 
         Returns:
-            Meccsek listája, mindegyik:
-            {
-                "event_id": int,
-                "home_team": str, "home_team_id": int,
-                "away_team": str, "away_team_id": int,
-                "home_goals": int, "away_goals": int,
-                "tournament_id": int,
-            }
+            Meccsek listája.
         """
         matches = []
         page = 0
@@ -225,7 +286,7 @@ class SofascoreClient:
                 tournament = event.get("tournament", {})
                 unique_tournament = tournament.get("uniqueTournament", {})
 
-                matches.append({
+                match_data = {
                     "event_id": event.get("id"),
                     "home_team": home_team.get("name", ""),
                     "home_team_id": home_team.get("id"),
@@ -234,14 +295,24 @@ class SofascoreClient:
                     "home_goals": int(home_goals),
                     "away_goals": int(away_goals),
                     "tournament_id": unique_tournament.get("id"),
-                })
+                    "start_timestamp": event.get("startTimestamp", 0),
+                }
+
+                # Félidei eredmény ha elérhető (trendekhez)
+                ht_home = home_score.get("period1")
+                ht_away = away_score.get("period1")
+                if ht_home is not None and ht_away is not None:
+                    match_data["ht_home_goals"] = int(ht_home)
+                    match_data["ht_away_goals"] = int(ht_away)
+
+                matches.append(match_data)
 
                 if len(matches) >= n:
                     break
 
             page += 1
-            # Max 3 oldal (biztonsági limit)
-            if page >= 3:
+            # Max 5 oldal (20 meccshez több oldal kellhet)
+            if page >= 5:
                 break
 
         return matches[:n]

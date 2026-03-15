@@ -2,6 +2,10 @@
 
 A main.py és a Telegram bot közös alapja. Visszaadja a nyers adatokat
 megjelenítés nélkül.
+
+Adatforrás prioritás:
+1. Sofascore (elsődleges)
+2. API-Football (fallback ha Sofascore blokkolja a cloud IP-t)
 """
 
 import logging
@@ -10,11 +14,13 @@ from datetime import datetime
 
 from src.analysis.predictor import MatchPrediction, PredictionEngine
 from src.analysis.stats import (
+    calculate_head_to_head,
     calculate_league_averages_from_matches,
     calculate_strength,
     calculate_team_stats,
 )
 from src.config import (
+    FORM_MATCHES,
     ODDS_API_KEY,
     SUPPORTED_LEAGUES,
     fuzzy_match_teams,
@@ -36,21 +42,56 @@ class PipelineResult:
     odds_requests_remaining: int | None = None
     errors: list[str] = field(default_factory=list)
     timestamp: datetime = field(default_factory=datetime.now)
+    data_source: str = ""  # "sofascore" vagy "api_football"
 
 
-def _collect_sofascore_matches(
+def _collect_matches(
     sofascore: SofascoreClient,
     competition: str | None,
-) -> list[dict]:
-    """Sofascore meccsek lekérdezése."""
+) -> tuple[list[dict], str]:
+    """Meccsek lekérdezése - Sofascore elsődleges, API-Football fallback.
+
+    Returns:
+        (matches, data_source)
+    """
+    # 1. próba: Sofascore
     logger.info("Sofascore meccsek lekérdezése...")
     matches = sofascore.get_scheduled_matches()
 
     if competition:
         matches = [m for m in matches if m["league_code"] == competition]
 
-    logger.info("  %d meccs találva a Sofascore-on", len(matches))
-    return matches
+    if matches:
+        logger.info("  %d meccs találva a Sofascore-on", len(matches))
+        return matches, "sofascore"
+
+    # 2. próba: API-Football fallback
+    logger.warning("Sofascore 0 meccs - API-Football fallback próba...")
+    try:
+        from src.scrapers.api_football import APIFootballClient
+        api_fb = APIFootballClient()
+
+        if api_fb.is_available:
+            matches = api_fb.get_scheduled_matches()
+            if competition:
+                matches = [m for m in matches if m["league_code"] == competition]
+
+            if matches:
+                logger.info("  %d meccs találva az API-Football-on", len(matches))
+                return matches, "api_football"
+            else:
+                logger.warning("API-Football sem talált meccseket")
+        else:
+            logger.warning(
+                "API-Football kulcs nincs beállítva. "
+                "Adj hozzá API_FOOTBALL_KEY-t a Railway Variables-ben! "
+                "Regisztráció: https://www.api-football.com/"
+            )
+    except Exception as e:
+        logger.warning("API-Football fallback hiba: %s", e)
+
+    logger.warning("Egyik adatforrás sem talált meccseket.")
+    return [], ""
 
 
 def _collect_odds(
@@ -133,12 +174,18 @@ def _fuzzy_match_events(
                     best_score = combined
                     matched_odds = tp_odds
 
+        start_ts = sf_match.get("start_timestamp", 0)
+        try:
+            kickoff = datetime.fromtimestamp(start_ts) if start_ts > 0 else datetime.now()
+        except (OSError, ValueError):
+            kickoff = datetime.now()
+
         event = MatchEvent(
             home_team=sf_match["home_team"],
             away_team=sf_match["away_team"],
             home_team_id=sf_match["home_team_id"],
             away_team_id=sf_match["away_team_id"],
-            kickoff=datetime.fromtimestamp(sf_match.get("start_timestamp", 0)),
+            kickoff=kickoff,
             competition=sf_match.get("league_name", ""),
             league_code=league_code,
             sofascore_event_id=sf_match.get("event_id", 0),
@@ -149,9 +196,21 @@ def _fuzzy_match_events(
     return events
 
 
+def _get_team_matches_client(data_source: str, sofascore: SofascoreClient):
+    """A megfelelő klienst adja vissza a csapat meccsek lekérdezéséhez."""
+    if data_source == "api_football":
+        try:
+            from src.scrapers.api_football import APIFootballClient
+            return APIFootballClient()
+        except Exception:
+            pass
+    return sofascore
+
+
 def _analyze_and_predict(
     sofascore: SofascoreClient,
     events: list[MatchEvent],
+    data_source: str = "sofascore",
 ) -> tuple[list[MatchPrediction], list[str]]:
     """Statisztikai elemzés és predikciók készítése.
 
@@ -163,13 +222,17 @@ def _analyze_and_predict(
     errors = []
     league_matches_cache: dict[str, list[dict]] = {}
 
+    # A megfelelő kliens kiválasztása a csapat meccsekhez
+    match_client = _get_team_matches_client(data_source, sofascore)
+
     for event in events:
         try:
-            home_matches = sofascore.get_team_last_n_matches(
-                event.home_team_id, n=10
+            # 20 meccs lekérdezése mélyelemzéshez
+            home_matches = match_client.get_team_last_n_matches(
+                event.home_team_id, n=FORM_MATCHES
             )
-            away_matches = sofascore.get_team_last_n_matches(
-                event.away_team_id, n=10
+            away_matches = match_client.get_team_last_n_matches(
+                event.away_team_id, n=FORM_MATCHES
             )
 
             league_code = event.league_code
@@ -193,11 +256,20 @@ def _analyze_and_predict(
             )
             away_stats = calculate_strength(away_stats, league_avg)
 
+            # H2H elemzés a letöltött meccsekből
+            all_matches_for_h2h = home_matches + away_matches
+            h2h = calculate_head_to_head(
+                all_matches_for_h2h,
+                event.home_team_id,
+                event.away_team_id,
+            )
+
             odds = event.odds if event.odds.home_win > 0 else None
             pred = engine.predict(
                 home_stats=home_stats,
                 away_stats=away_stats,
                 league_avg=league_avg,
+                h2h=h2h if h2h.matches_played > 0 else None,
                 odds=odds,
             )
             pred.competition = event.competition
@@ -231,8 +303,10 @@ def run_prediction_pipeline(
     sofascore = SofascoreClient()
     odds_client = OddsAPIClient()
 
-    # 1) Meccsek gyűjtése
-    sf_matches = _collect_sofascore_matches(sofascore, competition)
+    # 1) Meccsek gyűjtése (Sofascore -> API-Football fallback)
+    sf_matches, data_source = _collect_matches(sofascore, competition)
+    result.data_source = data_source
+
     if not sf_matches:
         logger.warning("Nem találtunk elemezendő meccseket.")
         return result
@@ -254,12 +328,12 @@ def run_prediction_pipeline(
     result.total_matches = len(events)
     result.matched_with_odds = sum(1 for e in events if e.odds.home_win > 0)
     logger.info(
-        "%d meccs összesen, %d oddsokkal párosítva",
-        result.total_matches, result.matched_with_odds,
+        "%d meccs összesen, %d oddsokkal párosítva (forrás: %s)",
+        result.total_matches, result.matched_with_odds, data_source,
     )
 
     # 4) Elemzés és predikció
-    predictions, errors = _analyze_and_predict(sofascore, events)
+    predictions, errors = _analyze_and_predict(sofascore, events, data_source)
     result.predictions = predictions
     result.errors = errors
 

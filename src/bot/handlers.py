@@ -78,9 +78,10 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("Nincs hozzáférésed ehhez a bothoz.")
         return
     text = (
-        "*TipMix Prediction Bot* 🤖⚽\n\n"
+        "*TipMix Prediction Bot v3* 🤖⚽\n\n"
         "Üdv\\! Ez a bot napi focimeccs elemzéseket küld "
-        "Poisson\\-modell és statisztikai O/U analízis alapján\\.\n\n"
+        "Ensemble modell alapján \\(Dixon\\-Coles \\+ ELO \\+ Forma\\)\\.\n"
+        "20 meccs mélyelemzés minden csapatnál\\.\n\n"
         "Használd a /help parancsot a lehetőségekhez\\."
     )
     await update.message.reply_text(text, parse_mode="MarkdownV2")

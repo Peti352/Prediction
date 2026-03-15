@@ -20,6 +20,9 @@ SOFASCORE_REQUEST_DELAY = 2  # másodperc a kérések között
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
 ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4"
 
+# === API-Football konfiguráció (Sofascore fallback) ===
+API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "")
+
 # === Telegram Bot konfiguráció ===
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -47,10 +50,30 @@ USER_AGENT = (
 )
 
 # === Predikciós beállítások ===
-FORM_MATCHES = 10          # Utolsó N meccs a formához
+FORM_MATCHES = 20          # Utolsó N meccs a formához (mélyelemzés)
 POISSON_MAX_GOALS = 7      # Poisson eloszlás max gól
 MIN_CONFIDENCE = 0.55      # Minimum konfidencia szelvényhez
 VALUE_BET_THRESHOLD = 0.05 # Minimum edge a value bet-hez (5%)
+
+# === ELO beállítások ===
+ELO_DEFAULT_RATING = 1500  # Alapértelmezett ELO rating
+ELO_K_FACTOR = 30          # Liga meccsek K-faktor
+ELO_HOME_ADVANTAGE = 100   # Hazai pálya ELO előny
+
+# === Dixon-Coles beállítások ===
+DIXON_COLES_RHO = -0.13    # Alacsony gólszámú korrelációs faktor
+
+# === Ensemble súlyok ===
+ENSEMBLE_WEIGHTS = {
+    "poisson": 0.35,       # Poisson/Dixon-Coles modell
+    "elo": 0.25,           # ELO alapú valószínűségek
+    "form": 0.20,          # Forma alapú becslés
+    "h2h": 0.10,           # Head-to-head történet
+    "stats": 0.10,         # Statisztikai O/U trendek
+}
+
+# === Időszúlyozás ===
+TIME_DECAY_FACTOR = 0.05   # Exponenciális súlycsökkenés régebbi meccsekre
 
 # === Szelvény beállítások ===
 TICKET_MIN_MATCHES = 3

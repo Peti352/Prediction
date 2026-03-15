@@ -1,10 +1,19 @@
-"""Statisztikai elemzés modul.
+"""Statisztikai elemzés modul - bővített verzió.
 
 Csapatforma, gólátlagok, hazai/vendég erő, O/U ráták (1.5, 2.5, 3.5).
+Bővített: ELO rating, időszúlyozott statisztikák, mélyebb H2H elemzés.
 Sofascore adatformátumra optimalizálva.
 """
 
+import math
 from dataclasses import dataclass, field
+
+from src.config import (
+    ELO_DEFAULT_RATING,
+    ELO_HOME_ADVANTAGE,
+    ELO_K_FACTOR,
+    TIME_DECAY_FACTOR,
+)
 
 
 @dataclass
@@ -26,6 +35,10 @@ class TeamStats:
     goals_conceded: int = 0
     avg_goals_scored: float = 0.0
     avg_goals_conceded: float = 0.0
+
+    # Időszúlyozott gólátlagok (újabb meccsek nagyobb súllyal)
+    weighted_avg_goals_scored: float = 0.0
+    weighted_avg_goals_conceded: float = 0.0
 
     # Hazai/Vendég bontás
     home_matches: int = 0
@@ -68,16 +81,44 @@ class TeamStats:
     # Meccs gól történet (statisztikai O/U-hoz)
     match_goals_history: list[int] = field(default_factory=list)
 
+    # ELO rating
+    elo_rating: float = ELO_DEFAULT_RATING
+
+    # Haladó statisztikák
+    scoring_consistency: float = 0.0   # Gólszerzés konzisztenciája (alacsonyabb szórás = jobb)
+    conceding_consistency: float = 0.0 # Gólkapás konzisztenciája
+    first_half_goals_ratio: float = 0.0  # Első félidei gólok aránya
+    comeback_rate: float = 0.0         # Hátrányból visszajövés %-a
+    win_to_nil_rate: float = 0.0       # Kapott gól nélküli győzelmek %-a
+
+    # Utolsó 5 meccs formája (rövidtávú trend)
+    recent_form_5: str = ""
+    recent_form_points_5: float = 0.0  # Pont/meccs az utolsó 5-ből
+
+    # Gólkülönbség trend
+    goal_diff_trend: float = 0.0  # Pozitív = javuló, negatív = romló
+
 
 @dataclass
 class HeadToHead:
-    """Két csapat egymás elleni statisztikái."""
+    """Két csapat egymás elleni statisztikái - bővített."""
     matches_played: int = 0
     home_wins: int = 0
     draws: int = 0
     away_wins: int = 0
     avg_total_goals: float = 0.0
     last_results: list[str] = field(default_factory=list)
+
+    # Bővített H2H
+    avg_home_goals: float = 0.0    # A hazai csapat átlagos góljai H2H-ban
+    avg_away_goals: float = 0.0    # A vendég csapat átlagos góljai H2H-ban
+    over25_rate: float = 0.0       # H2H-ban hány % over 2.5
+    gg_rate: float = 0.0           # H2H-ban hány % mindkét csapat szerzett gólt
+    home_win_rate: float = 0.0     # Hazai győzelmi arány
+    draw_rate: float = 0.0         # Döntetlen arány
+    away_win_rate: float = 0.0     # Vendég győzelmi arány
+    recent_trend: str = ""         # Utolsó 5 H2H eredmény
+    dominance_score: float = 0.0   # -1 (vendég dominál) - +1 (hazai dominál)
 
 
 @dataclass
@@ -90,6 +131,132 @@ class LeagueAverages:
     total_matches: int = 0
 
 
+# === ELO Rating Rendszer ===
+
+def elo_expected_score(rating_a: float, rating_b: float, home_advantage: float = ELO_HOME_ADVANTAGE) -> float:
+    """Várható eredmény ELO alapján (0.0 - 1.0)."""
+    dr = rating_a - rating_b + home_advantage
+    return 1.0 / (10.0 ** (-dr / 400.0) + 1.0)
+
+
+def elo_goal_diff_multiplier(goal_diff: int) -> float:
+    """Gólkülönbség szorzó az ELO frissítéshez."""
+    gd = abs(goal_diff)
+    if gd <= 1:
+        return 1.0
+    elif gd == 2:
+        return 1.5
+    elif gd == 3:
+        return 1.75
+    else:
+        return 1.75 + (gd - 3) / 8.0
+
+
+def elo_update(
+    rating: float,
+    expected: float,
+    actual: float,
+    goal_diff: int,
+    k_factor: float = ELO_K_FACTOR,
+) -> float:
+    """ELO rating frissítés egy meccs alapján."""
+    g = elo_goal_diff_multiplier(goal_diff)
+    return rating + k_factor * g * (actual - expected)
+
+
+def elo_to_probabilities(
+    home_elo: float,
+    away_elo: float,
+    home_advantage: float = ELO_HOME_ADVANTAGE,
+) -> tuple[float, float, float]:
+    """ELO ratingekből 1X2 valószínűségek.
+
+    Returns:
+        (home_win_prob, draw_prob, away_win_prob)
+    """
+    we_home = elo_expected_score(home_elo, away_elo, home_advantage)
+    we_away = 1.0 - we_home
+
+    # Döntetlen valószínűség becslése az ELO különbségből
+    elo_diff = abs(home_elo + home_advantage - away_elo)
+    # Kisebb különbség = nagyobb döntetlen esély (empirikus formula)
+    draw_base = 0.28 * math.exp(-elo_diff / 600.0)
+    draw_prob = max(0.10, min(0.35, draw_base))
+
+    home_win = we_home * (1.0 - draw_prob)
+    away_win = we_away * (1.0 - draw_prob)
+
+    # Normalizálás
+    total = home_win + draw_prob + away_win
+    return home_win / total, draw_prob / total, away_win / total
+
+
+def calculate_team_elo(
+    team_id: int | None,
+    team_name: str,
+    matches: list[dict],
+    initial_rating: float = ELO_DEFAULT_RATING,
+) -> float:
+    """Csapat ELO ratingjének kiszámítása a meccs történetből.
+
+    A legrégebbi meccstől halad az újabbak felé.
+    """
+    rating = initial_rating
+
+    # Fordított sorrend (legrégebbitől az újabbig)
+    sorted_matches = sorted(
+        matches,
+        key=lambda m: m.get("start_timestamp", 0),
+    )
+
+    for match in sorted_matches:
+        home_team_id = match.get("home_team_id", match.get("homeTeam", {}).get("id"))
+        away_team_id = match.get("away_team_id", match.get("awayTeam", {}).get("id"))
+        home_team_name = match.get("home_team", match.get("homeTeam", {}).get("name", ""))
+
+        home_goals = match.get("home_goals")
+        away_goals = match.get("away_goals")
+        if home_goals is None or away_goals is None:
+            continue
+
+        hg, ag = int(home_goals), int(away_goals)
+        is_home = home_team_id == team_id or home_team_name == team_name
+        is_away = not is_home and (away_team_id == team_id)
+
+        if not is_home and not is_away:
+            # Név alapú ellenőrzés
+            away_team_name = match.get("away_team", match.get("awayTeam", {}).get("name", ""))
+            if away_team_name == team_name:
+                is_away = True
+            else:
+                continue
+
+        if is_home:
+            scored, conceded = hg, ag
+            advantage = ELO_HOME_ADVANTAGE
+        else:
+            scored, conceded = ag, hg
+            advantage = -ELO_HOME_ADVANTAGE
+
+        # Eredmény (1=win, 0.5=draw, 0=loss)
+        if scored > conceded:
+            actual = 1.0
+        elif scored == conceded:
+            actual = 0.5
+        else:
+            actual = 0.0
+
+        goal_diff = scored - conceded
+        # Az ellenfél ratingjét nem tudjuk pontosan, átlagot használunk
+        opponent_rating = initial_rating
+        expected = elo_expected_score(rating, opponent_rating, advantage)
+        rating = elo_update(rating, expected, actual, abs(goal_diff))
+
+    return rating
+
+
+# === Csapat Statisztikák ===
+
 def calculate_team_stats(
     team_name: str,
     team_id: int | None,
@@ -97,6 +264,8 @@ def calculate_team_stats(
     competition_code: str = "",
 ) -> TeamStats:
     """Csapat statisztikáit számítja ki a Sofascore meccs-történetből.
+
+    Bővített: 20 meccs, időszúlyozás, ELO, trendek.
 
     Args:
         team_name: A csapat neve
@@ -119,8 +288,22 @@ def calculate_team_stats(
     over35_count = 0
     gg_count = 0
     clean_sheets = 0
+    win_to_nil_count = 0
 
-    for match in matches:
+    # Időszúlyozáshoz
+    scored_list = []
+    conceded_list = []
+    goal_diffs = []
+
+    # Félidei gólok
+    first_half_goals_total = 0
+    total_goals_for_ht = 0
+
+    # Comeback tracking
+    behind_count = 0
+    comeback_count = 0
+
+    for i, match in enumerate(matches):
         # Sofascore formátum: home_goals / away_goals közvetlenül
         home_goals = match.get("home_goals")
         away_goals = match.get("away_goals")
@@ -160,6 +343,10 @@ def calculate_team_stats(
             scored = away_goals
             conceded = home_goals
 
+        scored_list.append(scored)
+        conceded_list.append(conceded)
+        goal_diffs.append(scored - conceded)
+
         stats.goals_scored += scored
         stats.goals_conceded += conceded
 
@@ -167,6 +354,8 @@ def calculate_team_stats(
         if scored > conceded:
             result = "W"
             stats.wins += 1
+            if conceded == 0:
+                win_to_nil_count += 1
         elif scored == conceded:
             result = "D"
             stats.draws += 1
@@ -175,6 +364,25 @@ def calculate_team_stats(
             stats.losses += 1
 
         form_chars.append(result)
+
+        # Félidei gólok
+        ht_home = match.get("ht_home_goals")
+        ht_away = match.get("ht_away_goals")
+        if ht_home is not None and ht_away is not None:
+            if is_home:
+                first_half_goals_total += int(ht_home)
+            else:
+                first_half_goals_total += int(ht_away)
+            total_goals_for_ht += scored
+
+        # Comeback tracking (félidőben hátrányban volt-e)
+        if ht_home is not None and ht_away is not None:
+            ht_scored = int(ht_home) if is_home else int(ht_away)
+            ht_conceded = int(ht_away) if is_home else int(ht_home)
+            if ht_scored < ht_conceded:
+                behind_count += 1
+                if scored >= conceded:  # Visszajött legalább döntetlenre
+                    comeback_count += 1
 
         # Hazai/Vendég bontás
         if is_home:
@@ -220,7 +428,53 @@ def calculate_team_stats(
         stats.over35_rate = over35_count / n
         stats.gg_rate = gg_count / n
         stats.clean_sheet_rate = clean_sheets / n
-        stats.form_string = "".join(form_chars[:10])
+        stats.form_string = "".join(form_chars[:20])
+
+        # Win to nil
+        stats.win_to_nil_rate = win_to_nil_count / n
+
+        # Utolsó 5 meccs forma
+        recent_5 = form_chars[:5]
+        stats.recent_form_5 = "".join(recent_5)
+        if recent_5:
+            points_5 = sum({"W": 3, "D": 1, "L": 0}.get(c, 0) for c in recent_5)
+            stats.recent_form_points_5 = points_5 / len(recent_5)
+
+        # Időszúlyozott átlagok (exponenciális súlycsökkenés)
+        weights = [math.exp(-TIME_DECAY_FACTOR * i) for i in range(n)]
+        total_weight = sum(weights)
+        if total_weight > 0:
+            stats.weighted_avg_goals_scored = sum(
+                s * w for s, w in zip(scored_list, weights)
+            ) / total_weight
+            stats.weighted_avg_goals_conceded = sum(
+                c * w for c, w in zip(conceded_list, weights)
+            ) / total_weight
+
+        # Gólszerzés konzisztenciája (szórás)
+        if n > 1:
+            mean_scored = stats.avg_goals_scored
+            mean_conceded = stats.avg_goals_conceded
+            stats.scoring_consistency = math.sqrt(
+                sum((s - mean_scored) ** 2 for s in scored_list) / n
+            )
+            stats.conceding_consistency = math.sqrt(
+                sum((c - mean_conceded) ** 2 for c in conceded_list) / n
+            )
+
+        # Félidei gól arány
+        if total_goals_for_ht > 0:
+            stats.first_half_goals_ratio = first_half_goals_total / total_goals_for_ht
+
+        # Comeback ráta
+        if behind_count > 0:
+            stats.comeback_rate = comeback_count / behind_count
+
+        # Gólkülönbség trend (utolsó 5 vs előző 5)
+        if len(goal_diffs) >= 10:
+            recent_gd = sum(goal_diffs[:5]) / 5
+            older_gd = sum(goal_diffs[5:10]) / 5
+            stats.goal_diff_trend = recent_gd - older_gd
 
     if stats.home_matches > 0:
         stats.avg_home_goals_scored = stats.home_goals_scored / stats.home_matches
@@ -229,6 +483,9 @@ def calculate_team_stats(
     if stats.away_matches > 0:
         stats.avg_away_goals_scored = stats.away_goals_scored / stats.away_matches
         stats.avg_away_goals_conceded = stats.away_goals_conceded / stats.away_matches
+
+    # ELO rating számítás
+    stats.elo_rating = calculate_team_elo(team_id, team_name, matches)
 
     return stats
 
@@ -311,15 +568,22 @@ def calculate_league_averages(standings: list[dict]) -> LeagueAverages:
 def calculate_strength(
     stats: TeamStats, league_avg: LeagueAverages
 ) -> TeamStats:
-    """Kiszámítja a csapat támadó és védekező erősségét a liga átlaghoz képest."""
+    """Kiszámítja a csapat támadó és védekező erősségét a liga átlaghoz képest.
+
+    Bővített: időszúlyozott átlagok használata.
+    """
     if league_avg.avg_home_goals > 0 and league_avg.avg_away_goals > 0:
+        # Használjuk az időszúlyozott átlagokat ha van
+        scored_avg = stats.weighted_avg_goals_scored if stats.weighted_avg_goals_scored > 0 else stats.avg_goals_scored
+        conceded_avg = stats.weighted_avg_goals_conceded if stats.weighted_avg_goals_conceded > 0 else stats.avg_goals_conceded
+
         # Általános erősség
         stats.attack_strength = (
-            stats.avg_goals_scored / league_avg.avg_total_goals * 2
+            scored_avg / league_avg.avg_total_goals * 2
             if league_avg.avg_total_goals > 0 else 1.0
         )
         stats.defense_strength = (
-            stats.avg_goals_conceded / league_avg.avg_total_goals * 2
+            conceded_avg / league_avg.avg_total_goals * 2
             if league_avg.avg_total_goals > 0 else 1.0
         )
 
@@ -353,8 +617,13 @@ def calculate_strength(
 def calculate_head_to_head(
     matches: list[dict], home_team_id: int, away_team_id: int
 ) -> HeadToHead:
-    """Head-to-head statisztikák számítása."""
+    """Head-to-head statisztikák számítása - bővített."""
     h2h = HeadToHead()
+
+    total_home_goals = 0
+    total_away_goals = 0
+    over25_count = 0
+    gg_count = 0
 
     for match in matches:
         home_id = match.get("home_team_id", match.get("homeTeam", {}).get("id"))
@@ -380,7 +649,15 @@ def calculate_head_to_head(
         h2h.matches_played += 1
         h2h.avg_total_goals += hg + ag
 
+        total_goals = hg + ag
+        if total_goals > 2:
+            over25_count += 1
+        if hg > 0 and ag > 0:
+            gg_count += 1
+
         if home_id == home_team_id:
+            total_home_goals += hg
+            total_away_goals += ag
             if hg > ag:
                 h2h.home_wins += 1
                 h2h.last_results.append("W")
@@ -391,6 +668,8 @@ def calculate_head_to_head(
                 h2h.away_wins += 1
                 h2h.last_results.append("L")
         else:
+            total_home_goals += ag
+            total_away_goals += hg
             if ag > hg:
                 h2h.home_wins += 1
                 h2h.last_results.append("W")
@@ -401,8 +680,20 @@ def calculate_head_to_head(
                 h2h.away_wins += 1
                 h2h.last_results.append("L")
 
-    if h2h.matches_played > 0:
-        h2h.avg_total_goals /= h2h.matches_played
+    n = h2h.matches_played
+    if n > 0:
+        h2h.avg_total_goals /= n
+        h2h.avg_home_goals = total_home_goals / n
+        h2h.avg_away_goals = total_away_goals / n
+        h2h.over25_rate = over25_count / n
+        h2h.gg_rate = gg_count / n
+        h2h.home_win_rate = h2h.home_wins / n
+        h2h.draw_rate = h2h.draws / n
+        h2h.away_win_rate = h2h.away_wins / n
+        h2h.recent_trend = "".join(h2h.last_results[:5])
+
+        # Dominancia score: -1 (vendég) ... +1 (hazai)
+        h2h.dominance_score = (h2h.home_wins - h2h.away_wins) / n
 
     return h2h
 

@@ -1,17 +1,31 @@
-"""Predikciós motor - Poisson modell alapú focimeccs előrejelzés.
+"""Predikciós motor - Ensemble modell alapú focimeccs előrejelzés.
 
-A Poisson eloszlás segítségével becsli a gólszámokat,
-majd ebből számítja a különböző piacok valószínűségeit.
-Bővített: O/U 1.5, 2.5, 3.5 + statisztikai O/U ráták.
+Három modell kombinálása pontosabb előrejelzéshez:
+1. Dixon-Coles korrigált Poisson modell
+2. ELO rating alapú valószínűségek
+3. Időszúlyozott forma modell
+
+Bővített: 20 meccs elemzés, mélyebb H2H, konzisztencia faktor.
 """
 
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.stats import poisson
 
-from src.analysis.stats import HeadToHead, LeagueAverages, TeamStats
-from src.config import POISSON_MAX_GOALS, VALUE_BET_THRESHOLD
+from src.analysis.stats import (
+    HeadToHead,
+    LeagueAverages,
+    TeamStats,
+    elo_to_probabilities,
+)
+from src.config import (
+    DIXON_COLES_RHO,
+    ENSEMBLE_WEIGHTS,
+    POISSON_MAX_GOALS,
+    VALUE_BET_THRESHOLD,
+)
 from src.scrapers.odds_api import MatchOdds
 
 
@@ -26,10 +40,21 @@ class MatchPrediction:
     expected_home_goals: float = 0.0
     expected_away_goals: float = 0.0
 
-    # 1X2 valószínűségek
+    # 1X2 valószínűségek (Ensemble)
     home_win_prob: float = 0.0
     draw_prob: float = 0.0
     away_win_prob: float = 0.0
+
+    # Egyes modellek 1X2 valószínűségei (átláthatóság)
+    poisson_home: float = 0.0
+    poisson_draw: float = 0.0
+    poisson_away: float = 0.0
+    elo_home: float = 0.0
+    elo_draw: float = 0.0
+    elo_away: float = 0.0
+    form_home: float = 0.0
+    form_draw: float = 0.0
+    form_away: float = 0.0
 
     # Over/Under 1.5 (Poisson)
     over15_prob: float = 0.0
@@ -82,9 +107,16 @@ class MatchPrediction:
     # Odds referencia
     match_odds: MatchOdds | None = None
 
+    # Ensemble részletek
+    model_agreement: float = 0.0  # Modellek közötti egyetértés (0-1)
+    prediction_quality: str = ""   # "magas" / "közepes" / "alacsony"
+
+    # H2H referencia
+    h2h_data: HeadToHead | None = None
+
 
 class PredictionEngine:
-    """Poisson-modell alapú predikciós motor."""
+    """Ensemble predikciós motor - Dixon-Coles + ELO + Forma."""
 
     def __init__(self, max_goals: int = POISSON_MAX_GOALS):
         self.max_goals = max_goals
@@ -97,16 +129,17 @@ class PredictionEngine:
         h2h: HeadToHead | None = None,
         odds: MatchOdds | None = None,
     ) -> MatchPrediction:
-        """Teljes meccs predikció."""
+        """Teljes meccs predikció ensemble modellel."""
         pred = MatchPrediction(
             home_team=home_stats.team_name,
             away_team=away_stats.team_name,
             home_stats=home_stats,
             away_stats=away_stats,
             match_odds=odds,
+            h2h_data=h2h,
         )
 
-        # 1) Várható gólok
+        # === 1. MODELL: Dixon-Coles Poisson ===
         pred.expected_home_goals = self._calculate_expected_goals(
             home_stats, away_stats, league_avg, is_home=True
         )
@@ -114,10 +147,10 @@ class PredictionEngine:
             away_stats, home_stats, league_avg, is_home=False
         )
 
-        # H2H korrekció
+        # H2H korrekció a lambda-kra
         if h2h and h2h.matches_played >= 3:
             pred.expected_home_goals, pred.expected_away_goals = (
-                self._h2h_adjustment(
+                self._h2h_goal_adjustment(
                     pred.expected_home_goals,
                     pred.expected_away_goals,
                     h2h,
@@ -128,32 +161,99 @@ class PredictionEngine:
         pred.expected_home_goals = max(0.2, pred.expected_home_goals)
         pred.expected_away_goals = max(0.2, pred.expected_away_goals)
 
-        # 2) Gól-mátrix (Poisson)
-        pred.goal_matrix = self._build_goal_matrix(
+        # Dixon-Coles korrigált gól-mátrix
+        pred.goal_matrix = self._build_dixon_coles_matrix(
             pred.expected_home_goals, pred.expected_away_goals
         )
 
-        # 3) Piacok valószínűségei
-        self._calculate_1x2(pred)
+        # Poisson 1X2
+        self._calculate_1x2_from_matrix(pred)
+        pred.poisson_home = pred.home_win_prob
+        pred.poisson_draw = pred.draw_prob
+        pred.poisson_away = pred.away_win_prob
+
+        # O/U és GG/NG (ezek a mátrixból jönnek, nem az ensemble-ből)
         self._calculate_over_under_15(pred)
         self._calculate_over_under_25(pred)
         self._calculate_over_under_35(pred)
         self._calculate_gg_ng(pred)
         self._calculate_exact_scores(pred)
 
-        # 4) Statisztikai O/U ráták
+        # === 2. MODELL: ELO ===
+        pred.elo_home, pred.elo_draw, pred.elo_away = elo_to_probabilities(
+            home_stats.elo_rating, away_stats.elo_rating
+        )
+
+        # === 3. MODELL: Forma ===
+        pred.form_home, pred.form_draw, pred.form_away = self._form_based_prediction(
+            home_stats, away_stats
+        )
+
+        # === ENSEMBLE KOMBINÁLÁS ===
+        self._ensemble_combine(pred, h2h)
+
+        # Statisztikai O/U ráták
         self._calculate_statistical_ou(pred)
 
-        # 5) Value bet elemzés
+        # Value bet elemzés
         if odds:
             self._find_value_bets(pred, odds)
             self._find_stat_value_bets(pred, odds)
 
-        # 6) Konfidencia és ajánlás
+        # Konfidencia és ajánlás
         self._calculate_confidence(pred)
         self._generate_recommendation(pred, odds)
 
         return pred
+
+    # === Dixon-Coles Modell ===
+
+    def _dixon_coles_correction(
+        self,
+        home_goals: int,
+        away_goals: int,
+        lambda_home: float,
+        mu_away: float,
+        rho: float = DIXON_COLES_RHO,
+    ) -> float:
+        """Dixon-Coles korrekció alacsony gólszámú meccsekre.
+
+        Az alap Poisson modell feltételezi a gólok függetlenségét,
+        de a valóságban az alacsony gólszámú eredmények (0-0, 1-0, 0-1, 1-1)
+        korrelálnak egymással. A rho paraméter ezt korrigálja.
+        """
+        if home_goals == 0 and away_goals == 0:
+            return 1.0 - lambda_home * mu_away * rho
+        elif home_goals == 0 and away_goals == 1:
+            return 1.0 + lambda_home * rho
+        elif home_goals == 1 and away_goals == 0:
+            return 1.0 + mu_away * rho
+        elif home_goals == 1 and away_goals == 1:
+            return 1.0 - rho
+        else:
+            return 1.0
+
+    def _build_dixon_coles_matrix(
+        self, exp_home: float, exp_away: float
+    ) -> np.ndarray:
+        """Dixon-Coles korrigált gól-mátrix."""
+        n = self.max_goals + 1
+        matrix = np.zeros((n, n))
+
+        for i in range(n):
+            for j in range(n):
+                base_prob = poisson.pmf(i, exp_home) * poisson.pmf(j, exp_away)
+                correction = self._dixon_coles_correction(
+                    i, j, exp_home, exp_away
+                )
+                matrix[i, j] = base_prob * max(0.0, correction)
+
+        # Normalizálás (a korrekció miatt a teljes összeg eltérhet 1-től)
+        total = matrix.sum()
+        if total > 0:
+            matrix /= total
+
+        return matrix
 
     def _calculate_expected_goals(
         self,
@@ -162,7 +262,7 @@ class PredictionEngine:
         league_avg: LeagueAverages,
         is_home: bool,
     ) -> float:
-        """Várható gólszám számítása."""
+        """Várható gólszám számítása - időszúlyozott erősségekkel."""
         if is_home:
             attack = attacking_team.home_attack_strength
             defense = defending_team.away_defense_strength
@@ -181,60 +281,258 @@ class PredictionEngine:
 
         expected = attack * defense * league_rate
 
-        # Forma korrekció
-        form = attacking_team.form_string[:5]
+        # Forma korrekció (utolsó 5 meccs, nagyobb súly)
+        form = attacking_team.recent_form_5 or attacking_team.form_string[:5]
         if form:
             form_factor = self._form_factor(form)
             expected *= form_factor
 
+        # Gólkülönbség trend korrekció
+        if attacking_team.goal_diff_trend != 0:
+            trend_factor = 1.0 + attacking_team.goal_diff_trend * 0.03
+            trend_factor = max(0.90, min(1.10, trend_factor))
+            expected *= trend_factor
+
+        # Konzisztencia korrekció
+        # Inkonzisztens gólszerzés = nagyobb bizonytalanság
+        if attacking_team.scoring_consistency > 1.5:
+            expected *= 0.97  # Kicsit csökkentjük ha nagyon változékony
+
         return expected
 
     def _form_factor(self, form_string: str) -> float:
-        """Forma korrekciósfaktor (0.85 - 1.15)."""
+        """Időszúlyozott forma korrekciósfaktor (0.82 - 1.18).
+
+        Újabb meccsek nagyobb súlyt kapnak.
+        """
         if not form_string:
             return 1.0
 
-        points = sum(
-            {"W": 3, "D": 1, "L": 0}.get(c, 0) for c in form_string
-        )
-        max_points = len(form_string) * 3
-        form_ratio = points / max_points
+        total_weighted = 0.0
+        total_weight = 0.0
 
-        return 0.85 + form_ratio * 0.30
+        for i, char in enumerate(form_string):
+            points = {"W": 3, "D": 1, "L": 0}.get(char, 0)
+            weight = math.exp(-0.15 * i)  # Exponenciális súlycsökkenés
+            total_weighted += points * weight
+            total_weight += weight
 
-    def _h2h_adjustment(
+        if total_weight == 0:
+            return 1.0
+
+        weighted_ratio = total_weighted / (total_weight * 3)
+        return 0.82 + weighted_ratio * 0.36
+
+    # === ELO Modell ===
+    # (Az ELO számítás a stats.py-ban van, itt csak a valószínűségeket használjuk)
+
+    # === Forma Modell ===
+
+    def _form_based_prediction(
+        self,
+        home_stats: TeamStats,
+        away_stats: TeamStats,
+    ) -> tuple[float, float, float]:
+        """Forma alapú 1X2 valószínűségek.
+
+        Az utolsó 5-10 meccs eredményeiből számol, figyelembe véve:
+        - Hazai/vendég forma külön
+        - Pont/meccs arány
+        - Győzelmi/vereségi sorozatok
+        """
+        # Hazai csapat hazai formája
+        home_form_score = self._calculate_form_score(home_stats, is_home=True)
+        # Vendég csapat vendég formája
+        away_form_score = self._calculate_form_score(away_stats, is_home=False)
+
+        # Nyers erőviszonyok formából
+        home_power = home_form_score * 1.1  # Hazai pálya szorzó
+        away_power = away_form_score
+
+        total = home_power + away_power
+        if total == 0:
+            return 0.4, 0.25, 0.35
+
+        home_ratio = home_power / total
+        away_ratio = away_power / total
+
+        # Döntetlen valószínűsége a forma egyensúlyából
+        form_diff = abs(home_ratio - away_ratio)
+        draw_prob = max(0.15, 0.30 - form_diff * 0.4)
+
+        home_win = home_ratio * (1.0 - draw_prob)
+        away_win = away_ratio * (1.0 - draw_prob)
+
+        # Normalizálás
+        total = home_win + draw_prob + away_win
+        return home_win / total, draw_prob / total, away_win / total
+
+    def _calculate_form_score(
+        self, stats: TeamStats, is_home: bool
+    ) -> float:
+        """Forma pontszám (0.0 - 3.0)."""
+        if stats.matches_played == 0:
+            return 1.5
+
+        # Utolsó 5 meccs pont/meccs
+        recent_ppg = stats.recent_form_points_5 if stats.recent_form_points_5 > 0 else 1.5
+
+        # Hazai/vendég specifikus teljesítmény
+        if is_home and stats.home_matches > 0:
+            specific_ppg = (
+                stats.home_wins * 3 + stats.home_draws
+            ) / stats.home_matches
+        elif not is_home and stats.away_matches > 0:
+            specific_ppg = (
+                stats.away_wins * 3 + stats.away_draws
+            ) / stats.away_matches
+        else:
+            specific_ppg = recent_ppg
+
+        # Súlyozott: 60% utolsó 5, 40% hazai/vendég specifikus
+        return recent_ppg * 0.6 + specific_ppg * 0.4
+
+    # === Ensemble ===
+
+    def _ensemble_combine(
+        self,
+        pred: MatchPrediction,
+        h2h: HeadToHead | None,
+    ):
+        """Modellek kombinálása súlyozott átlaggal."""
+        w = ENSEMBLE_WEIGHTS
+
+        # H2H modell (ha van elég adat)
+        if h2h and h2h.matches_played >= 3:
+            h2h_home = h2h.home_win_rate
+            h2h_draw = h2h.draw_rate
+            h2h_away = h2h.away_win_rate
+        else:
+            # Ha nincs H2H, az ELO-nak adjuk a súlyt
+            h2h_home = pred.elo_home
+            h2h_draw = pred.elo_draw
+            h2h_away = pred.elo_away
+
+        # Stat modell (O/U trendekből)
+        stat_home, stat_draw, stat_away = self._stats_based_1x2(pred)
+
+        # Súlyozott összeg
+        models = [
+            (pred.poisson_home, pred.poisson_draw, pred.poisson_away, w["poisson"]),
+            (pred.elo_home, pred.elo_draw, pred.elo_away, w["elo"]),
+            (pred.form_home, pred.form_draw, pred.form_away, w["form"]),
+            (h2h_home, h2h_draw, h2h_away, w["h2h"]),
+            (stat_home, stat_draw, stat_away, w["stats"]),
+        ]
+
+        combined_home = sum(h * wt for h, _, _, wt in models)
+        combined_draw = sum(d * wt for _, d, _, wt in models)
+        combined_away = sum(a * wt for _, _, a, wt in models)
+
+        # Normalizálás
+        total = combined_home + combined_draw + combined_away
+        if total > 0:
+            pred.home_win_prob = combined_home / total
+            pred.draw_prob = combined_draw / total
+            pred.away_win_prob = combined_away / total
+
+        # Modellek közötti egyetértés mérése
+        all_home_probs = [h for h, _, _, _ in models]
+        all_away_probs = [a for _, _, a, _ in models]
+
+        # Standard deviáció: alacsonyabb = nagyobb egyetértés
+        if len(all_home_probs) > 1:
+            home_std = np.std(all_home_probs)
+            away_std = np.std(all_away_probs)
+            avg_std = (home_std + away_std) / 2
+            # 0 std = tökéletes egyetértés (1.0), 0.2+ std = rossz (0.0)
+            pred.model_agreement = max(0.0, 1.0 - avg_std * 5)
+
+    def _stats_based_1x2(
+        self, pred: MatchPrediction
+    ) -> tuple[float, float, float]:
+        """Statisztikai mutatókból 1X2 becslés."""
+        hs = pred.home_stats
+        aws = pred.away_stats
+
+        if not hs or not aws:
+            return 0.4, 0.25, 0.35
+
+        # Gólszerzés vs kapott gólok alapú erőviszony
+        home_power = (hs.weighted_avg_goals_scored or hs.avg_goals_scored) - (
+            aws.weighted_avg_goals_scored or aws.avg_goals_scored
+        ) * 0.3
+        away_power = (aws.weighted_avg_goals_scored or aws.avg_goals_scored) - (
+            hs.weighted_avg_goals_scored or hs.avg_goals_scored
+        ) * 0.3
+
+        # Clean sheet / win to nil arányok
+        home_def_bonus = hs.clean_sheet_rate * 0.2
+        away_def_bonus = aws.clean_sheet_rate * 0.2
+
+        home_score = max(0.1, home_power + home_def_bonus + 0.5)
+        away_score = max(0.1, away_power + away_def_bonus + 0.5)
+
+        total = home_score + away_score
+        home_ratio = home_score / total
+        away_ratio = away_score / total
+
+        draw_prob = max(0.15, 0.28 - abs(home_ratio - away_ratio) * 0.3)
+        home_win = home_ratio * (1.0 - draw_prob)
+        away_win = away_ratio * (1.0 - draw_prob)
+
+        total = home_win + draw_prob + away_win
+        return home_win / total, draw_prob / total, away_win / total
+
+    # === H2H Korrekciók ===
+
+    def _h2h_goal_adjustment(
         self,
         exp_home: float,
         exp_away: float,
         h2h: HeadToHead,
     ) -> tuple[float, float]:
-        """H2H finomhangolás (max ±10%)."""
+        """H2H finomhangolás a várható gólokra.
+
+        Bővített: gólátlagok és dominancia alapú korrekció.
+        Max ±15% korrekció több meccs alapján.
+        """
         n = h2h.matches_played
         if n < 3:
             return exp_home, exp_away
 
-        home_rate = h2h.home_wins / n
-        away_rate = h2h.away_wins / n
+        # Korrekció erőssége a meccsszámtól függ
+        # 3 meccs: max ±8%, 5+: max ±12%, 10+: max ±15%
+        max_adj = min(0.15, 0.05 + n * 0.01)
 
-        home_adj = max(0.90, min(1.10, 1.0 + (home_rate - 0.5) * 0.2))
-        away_adj = max(0.90, min(1.10, 1.0 + (away_rate - 0.5) * 0.2))
+        # H2H gólátlagok vs aktuális várható
+        if h2h.avg_home_goals > 0:
+            h2h_home_ratio = h2h.avg_home_goals / max(0.5, (h2h.avg_home_goals + h2h.avg_away_goals) / 2)
+            home_adj = 1.0 + (h2h_home_ratio - 1.0) * 0.3
+        else:
+            home_adj = 1.0
+
+        if h2h.avg_away_goals > 0:
+            h2h_away_ratio = h2h.avg_away_goals / max(0.5, (h2h.avg_home_goals + h2h.avg_away_goals) / 2)
+            away_adj = 1.0 + (h2h_away_ratio - 1.0) * 0.3
+        else:
+            away_adj = 1.0
+
+        # Dominancia korrekció
+        dom = h2h.dominance_score  # -1 ... +1
+        home_adj += dom * 0.05
+        away_adj -= dom * 0.05
+
+        # Clamp
+        home_adj = max(1.0 - max_adj, min(1.0 + max_adj, home_adj))
+        away_adj = max(1.0 - max_adj, min(1.0 + max_adj, away_adj))
 
         return exp_home * home_adj, exp_away * away_adj
 
-    def _build_goal_matrix(
-        self, exp_home: float, exp_away: float
-    ) -> np.ndarray:
-        """Poisson gól-mátrix."""
-        home_probs = [
-            poisson.pmf(i, exp_home) for i in range(self.max_goals + 1)
-        ]
-        away_probs = [
-            poisson.pmf(i, exp_away) for i in range(self.max_goals + 1)
-        ]
-        return np.outer(home_probs, away_probs)
+    # === Mátrix alapú számítások ===
 
-    def _calculate_1x2(self, pred: MatchPrediction):
-        """1X2 valószínűségek."""
+    def _calculate_1x2_from_matrix(self, pred: MatchPrediction):
+        """1X2 valószínűségek a gól-mátrixból."""
         matrix = pred.goal_matrix
         n = matrix.shape[0]
 
@@ -342,11 +640,13 @@ class PredictionEngine:
             pred.away_stat_over25 = aws.over25_rate
             pred.away_stat_over35 = aws.over35_rate
 
-        # Kombinált: két csapat átlaga
+        # Kombinált: két csapat súlyozott átlaga (hazai kissé nagyobb súly)
         if hs and aws:
-            pred.combined_stat_over15 = (hs.over15_rate + aws.over15_rate) / 2
-            pred.combined_stat_over25 = (hs.over25_rate + aws.over25_rate) / 2
-            pred.combined_stat_over35 = (hs.over35_rate + aws.over35_rate) / 2
+            pred.combined_stat_over15 = hs.over15_rate * 0.55 + aws.over15_rate * 0.45
+            pred.combined_stat_over25 = hs.over25_rate * 0.55 + aws.over25_rate * 0.45
+            pred.combined_stat_over35 = hs.over35_rate * 0.55 + aws.over35_rate * 0.45
+
+    # === Value Bet Elemzés ===
 
     def _find_value_bets(self, pred: MatchPrediction, odds: MatchOdds):
         """Poisson value bet azonosítás (11 piac)."""
@@ -374,6 +674,9 @@ class PredictionEngine:
             edge = our_prob - implied_prob
 
             if edge > VALUE_BET_THRESHOLD:
+                # Konfidencia szorzó: magasabb model_agreement = erősebb value bet
+                quality_mult = 0.8 + pred.model_agreement * 0.2
+
                 pred.value_bets.append({
                     "market": name,
                     "our_prob": our_prob,
@@ -381,9 +684,10 @@ class PredictionEngine:
                     "odds": market_odds,
                     "edge": edge,
                     "expected_value": our_prob * market_odds - 1.0,
+                    "quality": quality_mult,
                 })
 
-        pred.value_bets.sort(key=lambda x: x["edge"], reverse=True)
+        pred.value_bets.sort(key=lambda x: x["edge"] * x.get("quality", 1.0), reverse=True)
 
     def _find_stat_value_bets(self, pred: MatchPrediction, odds: MatchOdds):
         """Statisztikai value bet azonosítás (stat% vs odds)."""
@@ -416,17 +720,47 @@ class PredictionEngine:
 
         pred.stat_value_bets.sort(key=lambda x: x["edge"], reverse=True)
 
+    # === Konfidencia és Ajánlás ===
+
     def _calculate_confidence(self, pred: MatchPrediction):
-        """Összesített konfidencia számítás."""
+        """Összesített konfidencia számítás - multi-faktor."""
         max_prob = max(pred.home_win_prob, pred.draw_prob, pred.away_win_prob)
 
+        # Adatminőség faktor
         data_quality = 1.0
-        if pred.home_stats and pred.home_stats.matches_played < 5:
-            data_quality *= 0.7
-        if pred.away_stats and pred.away_stats.matches_played < 5:
-            data_quality *= 0.7
+        if pred.home_stats:
+            if pred.home_stats.matches_played < 5:
+                data_quality *= 0.7
+            elif pred.home_stats.matches_played < 10:
+                data_quality *= 0.85
+        if pred.away_stats:
+            if pred.away_stats.matches_played < 5:
+                data_quality *= 0.7
+            elif pred.away_stats.matches_played < 10:
+                data_quality *= 0.85
 
-        pred.confidence = max_prob * data_quality
+        # Modellek egyetértése
+        agreement_factor = 0.85 + pred.model_agreement * 0.15
+
+        # Konzisztencia faktor
+        consistency_factor = 1.0
+        if pred.home_stats and pred.away_stats:
+            avg_consistency = (
+                pred.home_stats.scoring_consistency +
+                pred.away_stats.scoring_consistency
+            ) / 2
+            if avg_consistency > 1.5:
+                consistency_factor = 0.92  # Inkonzisztens csapatok = kevésbé kiszámítható
+
+        pred.confidence = max_prob * data_quality * agreement_factor * consistency_factor
+
+        # Predikció minőség besorolás
+        if pred.confidence >= 0.65 and pred.model_agreement >= 0.7:
+            pred.prediction_quality = "magas"
+        elif pred.confidence >= 0.50:
+            pred.prediction_quality = "közepes"
+        else:
+            pred.prediction_quality = "alacsony"
 
     def _generate_recommendation(
         self, pred: MatchPrediction, odds: MatchOdds | None
