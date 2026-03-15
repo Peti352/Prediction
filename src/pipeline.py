@@ -65,30 +65,30 @@ def _collect_matches(
         logger.info("  %d meccs találva a Sofascore-on", len(matches))
         return matches, "sofascore"
 
-    # 2. próba: API-Football fallback
-    logger.warning("Sofascore 0 meccs - API-Football fallback próba...")
+    # 2. próba: football-data.org fallback
+    logger.warning("Sofascore 0 meccs - football-data.org fallback próba...")
     try:
-        from src.scrapers.api_football import APIFootballClient
-        api_fb = APIFootballClient()
+        from src.scrapers.api_football import FootballDataClient
+        fd_client = FootballDataClient()
 
-        if api_fb.is_available:
-            matches = api_fb.get_scheduled_matches()
+        if fd_client.is_available:
+            matches = fd_client.get_scheduled_matches()
             if competition:
                 matches = [m for m in matches if m["league_code"] == competition]
 
             if matches:
-                logger.info("  %d meccs találva az API-Football-on", len(matches))
-                return matches, "api_football"
+                logger.info("  %d meccs találva a football-data.org-on", len(matches))
+                return matches, "football_data"
             else:
-                logger.warning("API-Football sem talált meccseket")
+                logger.warning("football-data.org sem talált meccseket")
         else:
             logger.warning(
-                "API-Football kulcs nincs beállítva. "
-                "Adj hozzá API_FOOTBALL_KEY-t a Railway Variables-ben! "
-                "Regisztráció: https://www.api-football.com/"
+                "football-data.org kulcs nincs beállítva. "
+                "Adj hozzá FOOTBALL_DATA_KEY-t a Railway Variables-ben! "
+                "Regisztráció: https://www.football-data.org/client/register"
             )
     except Exception as e:
-        logger.warning("API-Football fallback hiba: %s", e)
+        logger.warning("football-data.org fallback hiba: %s", e)
 
     logger.warning("Egyik adatforrás sem talált meccseket.")
     return [], ""
@@ -198,10 +198,10 @@ def _fuzzy_match_events(
 
 def _get_team_matches_client(data_source: str, sofascore: SofascoreClient):
     """A megfelelő klienst adja vissza a csapat meccsek lekérdezéséhez."""
-    if data_source == "api_football":
+    if data_source == "football_data":
         try:
-            from src.scrapers.api_football import APIFootballClient
-            return APIFootballClient()
+            from src.scrapers.api_football import FootballDataClient
+            return FootballDataClient()
         except Exception:
             pass
     return sofascore

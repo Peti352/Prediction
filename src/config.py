@@ -20,8 +20,8 @@ SOFASCORE_REQUEST_DELAY = 2  # másodperc a kérések között
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
 ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4"
 
-# === API-Football konfiguráció (Sofascore fallback) ===
-API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "")
+# === football-data.org konfiguráció (Sofascore fallback) ===
+FOOTBALL_DATA_KEY = os.getenv("FOOTBALL_DATA_KEY", "")
 
 # === Telegram Bot konfiguráció ===
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")

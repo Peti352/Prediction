@@ -1,12 +1,12 @@
-"""API-Football fallback kliens - megbízható cloud-kompatibilis adatforrás.
+"""football-data.org API kliens - megbízható cloud-kompatibilis adatforrás.
 
-Használat: Ha a Sofascore blokkolja a cloud szerver IP-jét (Railway, stb.),
-ez az API szolgáltatja a meccs adatokat.
+Sofascore fallback ha a Sofascore blokkolja a cloud szerver IP-jét.
 
-Ingyenes tier: 100 request/nap - bőven elég a napi elemzéshez.
-Regisztráció: https://www.api-football.com/ (vagy https://rapidapi.com/api-sports/api/api-football)
+Ingyenes tier: 10 request/perc - bőven elég.
+Regisztráció: https://www.football-data.org/client/register
+Nincs szezon korlátozás!
 
-Env változó: API_FOOTBALL_KEY
+Env változó: FOOTBALL_DATA_KEY
 """
 
 import hashlib
@@ -21,24 +21,19 @@ from src.config import (
     CACHE_DIR,
     CACHE_TTL_HOURS,
     REQUEST_TIMEOUT,
-    SUPPORTED_LEAGUES,
 )
 
 logger = logging.getLogger(__name__)
 
-# API-Football liga ID-k
-_LEAGUE_IDS = {
-    "PL": 39,    # Premier League
-    "BL1": 78,   # Bundesliga
-    "SA": 135,   # Serie A
-    "PD": 140,   # La Liga
-    "FL1": 61,   # Ligue 1
+# football-data.org liga kódok (megegyeznek a mi kódjainkkal)
+_LEAGUE_CODES = {
+    "PL": "PL",     # Premier League
+    "BL1": "BL1",   # Bundesliga
+    "SA": "SA",      # Serie A
+    "PD": "PD",      # La Liga (Primera Division)
+    "FL1": "FL1",    # Ligue 1
 }
 
-# Inverz: API-Football league ID -> liga kód
-_LEAGUE_ID_TO_CODE = {v: k for k, v in _LEAGUE_IDS.items()}
-
-# Liga nevek
 _LEAGUE_NAMES = {
     "PL": "Premier League",
     "BL1": "Bundesliga",
@@ -48,28 +43,35 @@ _LEAGUE_NAMES = {
 }
 
 
-class APIFootballClient:
-    """API-Football kliens - Sofascore fallback."""
+class FootballDataClient:
+    """football-data.org API kliens - Sofascore fallback."""
 
-    BASE_URL = "https://v3.football.api-sports.io"
+    BASE_URL = "https://api.football-data.org/v4"
 
     def __init__(self, api_key: str = ""):
         import os
-        self.api_key = api_key or os.getenv("API_FOOTBALL_KEY", "")
+        self.api_key = api_key or os.getenv("FOOTBALL_DATA_KEY", "")
         self._session = requests.Session()
         self._session.headers.update({
-            "x-apisports-key": self.api_key,
+            "X-Auth-Token": self.api_key,
         })
-        self._requests_today = 0
+        self._last_request_time = 0.0
 
     @property
     def is_available(self) -> bool:
         """Van-e API kulcs beállítva."""
         return bool(self.api_key) and self.api_key != "your_key_here"
 
+    def _rate_limit(self):
+        """10 req/perc = min 6 mp között."""
+        elapsed = time.time() - self._last_request_time
+        if elapsed < 6.5:
+            time.sleep(6.5 - elapsed)
+        self._last_request_time = time.time()
+
     def _cache_key(self, url: str, params: dict) -> str:
-        key_str = f"apifb_{url}_{json.dumps(params, sort_keys=True)}"
-        return f"apifb_{hashlib.md5(key_str.encode()).hexdigest()}.json"
+        key_str = f"fdata_{url}_{json.dumps(params, sort_keys=True)}"
+        return f"fdata_{hashlib.md5(key_str.encode()).hexdigest()}.json"
 
     def _get_cached(self, cache_key: str) -> dict | None:
         cache_file = CACHE_DIR / cache_key
@@ -91,8 +93,9 @@ class APIFootballClient:
         except OSError:
             pass
 
-    def _request(self, endpoint: str, params: dict, use_cache: bool = True) -> dict | None:
+    def _request(self, endpoint: str, params: dict | None = None, use_cache: bool = True) -> dict | None:
         url = f"{self.BASE_URL}/{endpoint}"
+        params = params or {}
         cache_key = self._cache_key(url, params)
 
         if use_cache:
@@ -100,23 +103,25 @@ class APIFootballClient:
             if cached is not None:
                 return cached
 
+        self._rate_limit()
+
         try:
             resp = self._session.get(url, params=params, timeout=REQUEST_TIMEOUT)
-            self._requests_today += 1
 
             if resp.status_code == 200:
                 data = resp.json()
-                if data.get("errors"):
-                    logger.warning("API-Football hiba: %s", data["errors"])
-                    return None
                 if use_cache:
                     self._save_cache(cache_key, data)
                 return data
+            elif resp.status_code == 429:
+                logger.warning("football-data.org rate limit - várakozás...")
+                time.sleep(60)
+                return None
             else:
-                logger.warning("API-Football %d: %s", resp.status_code, endpoint)
+                logger.warning("football-data.org %d: %s", resp.status_code, endpoint)
 
         except requests.RequestException as e:
-            logger.warning("API-Football request hiba: %s", e)
+            logger.warning("football-data.org request hiba: %s", e)
 
         return None
 
@@ -127,50 +132,42 @@ class APIFootballClient:
             Sofascore-kompatibilis formátumú meccs lista.
         """
         if not self.is_available:
-            logger.info("API-Football kulcs nincs beállítva, fallback kihagyva")
+            logger.info("football-data.org kulcs nincs beállítva, fallback kihagyva")
             return []
 
         if date is None:
             date = datetime.now().strftime("%Y-%m-%d")
 
-        logger.info("API-Football meccsek lekérdezése: %s", date)
+        logger.info("football-data.org meccsek lekérdezése: %s", date)
         all_matches = []
 
-        for league_code, league_id in _LEAGUE_IDS.items():
-            # Aktuális szezon meghatározása
-            year = datetime.now().year
-            month = datetime.now().month
-            season = year if month >= 7 else year - 1
-
-            data = self._request("fixtures", {
-                "league": league_id,
-                "season": season,
-                "date": date,
+        for league_code, fd_code in _LEAGUE_CODES.items():
+            data = self._request(f"competitions/{fd_code}/matches", {
+                "dateFrom": date,
+                "dateTo": date,
             })
 
-            if not data or "response" not in data:
+            if not data or "matches" not in data:
                 continue
 
-            for fixture in data["response"]:
-                teams = fixture.get("teams", {})
-                home = teams.get("home", {})
-                away = teams.get("away", {})
-                fixture_info = fixture.get("fixture", {})
+            for match in data["matches"]:
+                home = match.get("homeTeam", {})
+                away = match.get("awayTeam", {})
 
                 all_matches.append({
-                    "event_id": fixture_info.get("id", 0),
+                    "event_id": match.get("id", 0),
                     "home_team": home.get("name", ""),
                     "home_team_id": home.get("id", 0),
                     "away_team": away.get("name", ""),
                     "away_team_id": away.get("id", 0),
-                    "tournament_id": league_id,
+                    "tournament_id": 0,
                     "league_code": league_code,
                     "league_name": _LEAGUE_NAMES.get(league_code, ""),
-                    "start_timestamp": fixture_info.get("timestamp", 0),
-                    "_source": "api_football",
+                    "start_timestamp": _parse_utc_date(match.get("utcDate", "")),
+                    "_source": "football_data",
                 })
 
-        logger.info("API-Football: %d meccs találva", len(all_matches))
+        logger.info("football-data.org: %d meccs találva", len(all_matches))
         return all_matches
 
     def get_team_last_n_matches(
@@ -184,95 +181,61 @@ class APIFootballClient:
         if not self.is_available:
             return []
 
-        data = self._request("fixtures", {
-            "team": team_id,
-            "last": n,
+        data = self._request(f"teams/{team_id}/matches", {
+            "status": "FINISHED",
+            "limit": n,
         })
 
-        if not data or "response" not in data:
+        if not data or "matches" not in data:
             return []
 
         matches = []
-        for fixture in data["response"]:
-            teams = fixture.get("teams", {})
-            home = teams.get("home", {})
-            away = teams.get("away", {})
-            goals = fixture.get("goals", {})
-            score = fixture.get("score", {})
-            fixture_info = fixture.get("fixture", {})
+        for match in data["matches"]:
+            home = match.get("homeTeam", {})
+            away = match.get("awayTeam", {})
+            score = match.get("score", {})
+            full_time = score.get("fullTime", {})
+            half_time = score.get("halfTime", {})
 
-            home_goals = goals.get("home")
-            away_goals = goals.get("away")
+            home_goals = full_time.get("home")
+            away_goals = full_time.get("away")
 
             if home_goals is None or away_goals is None:
                 continue
 
             match_data = {
-                "event_id": fixture_info.get("id", 0),
+                "event_id": match.get("id", 0),
                 "home_team": home.get("name", ""),
                 "home_team_id": home.get("id", 0),
                 "away_team": away.get("name", ""),
                 "away_team_id": away.get("id", 0),
                 "home_goals": int(home_goals),
                 "away_goals": int(away_goals),
-                "tournament_id": fixture.get("league", {}).get("id"),
-                "start_timestamp": fixture_info.get("timestamp", 0),
+                "tournament_id": 0,
+                "start_timestamp": _parse_utc_date(match.get("utcDate", "")),
             }
 
             # Félidei eredmény
-            halftime = score.get("halftime", {})
-            ht_home = halftime.get("home")
-            ht_away = halftime.get("away")
+            ht_home = half_time.get("home")
+            ht_away = half_time.get("away")
             if ht_home is not None and ht_away is not None:
                 match_data["ht_home_goals"] = int(ht_home)
                 match_data["ht_away_goals"] = int(ht_away)
 
             matches.append(match_data)
 
-        return matches
+        # Legutóbbi meccsek elöl (fordított időrend)
+        matches.sort(key=lambda m: m.get("start_timestamp", 0), reverse=True)
+        return matches[:n]
 
-    def get_head_to_head(
-        self, team1_id: int, team2_id: int, last: int = 10
-    ) -> list[dict]:
-        """Head-to-head meccsek lekérdezése.
 
-        Returns:
-            Sofascore-kompatibilis formátumú meccs lista.
-        """
-        if not self.is_available:
-            return []
-
-        data = self._request("fixtures/headtohead", {
-            "h2h": f"{team1_id}-{team2_id}",
-            "last": last,
-        })
-
-        if not data or "response" not in data:
-            return []
-
-        matches = []
-        for fixture in data["response"]:
-            teams = fixture.get("teams", {})
-            home = teams.get("home", {})
-            away = teams.get("away", {})
-            goals = fixture.get("goals", {})
-            fixture_info = fixture.get("fixture", {})
-
-            home_goals = goals.get("home")
-            away_goals = goals.get("away")
-
-            if home_goals is None or away_goals is None:
-                continue
-
-            matches.append({
-                "event_id": fixture_info.get("id", 0),
-                "home_team": home.get("name", ""),
-                "home_team_id": home.get("id", 0),
-                "away_team": away.get("name", ""),
-                "away_team_id": away.get("id", 0),
-                "home_goals": int(home_goals),
-                "away_goals": int(away_goals),
-                "start_timestamp": fixture_info.get("timestamp", 0),
-            })
-
-        return matches
+def _parse_utc_date(utc_date_str: str) -> int:
+    """UTC dátum stringből UNIX timestamp."""
+    if not utc_date_str:
+        return 0
+    try:
+        # "2026-03-15T15:00:00Z" formátum
+        dt = datetime.fromisoformat(utc_date_str.replace("Z", "+00:00"))
+        return int(dt.timestamp())
+    except (ValueError, AttributeError):
+        return 0
