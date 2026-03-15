@@ -1,11 +1,12 @@
-"""Predikciós motor - Ensemble modell alapú focimeccs előrejelzés.
+"""Predikciós motor - Kalibrált ensemble modell focimeccs előrejelzéshez.
 
-Három modell kombinálása pontosabb előrejelzéshez:
+Modellek:
 1. Dixon-Coles korrigált Poisson modell
-2. ELO rating alapú valószínűségek
+2. Strength rating alapú valószínűségek (rövid távú erősségmutató)
 3. Időszúlyozott forma modell
 
-Bővített: 20 meccs elemzés, mélyebb H2H, konzisztencia faktor.
+v4: Probability kalibráció, per-market súlyok, szigorúbb value bet,
+    prediction vs betting confidence szétválasztás, single bet fókusz.
 """
 
 import math
@@ -18,13 +19,21 @@ from src.analysis.stats import (
     HeadToHead,
     LeagueAverages,
     TeamStats,
-    elo_to_probabilities,
+    strength_to_probabilities,
 )
 from src.config import (
+    CALIBRATION_MAX_PROB,
+    CALIBRATION_MIN_PROB,
+    CALIBRATION_SHRINKAGE,
     DIXON_COLES_RHO,
-    ENSEMBLE_WEIGHTS,
+    ENSEMBLE_WEIGHTS_1X2,
+    ENSEMBLE_WEIGHTS_GGNG,
+    ENSEMBLE_WEIGHTS_OU,
     POISSON_MAX_GOALS,
-    VALUE_BET_THRESHOLD,
+    VALUE_BET_MAX_ODDS,
+    VALUE_BET_MIN_CONFIDENCE,
+    VALUE_BET_MIN_EDGE,
+    VALUE_BET_MIN_ODDS,
 )
 from src.scrapers.odds_api import MatchOdds
 
@@ -49,9 +58,9 @@ class MatchPrediction:
     poisson_home: float = 0.0
     poisson_draw: float = 0.0
     poisson_away: float = 0.0
-    elo_home: float = 0.0
-    elo_draw: float = 0.0
-    elo_away: float = 0.0
+    strength_home: float = 0.0
+    strength_draw: float = 0.0
+    strength_away: float = 0.0
     form_home: float = 0.0
     form_draw: float = 0.0
     form_away: float = 0.0
@@ -110,6 +119,13 @@ class MatchPrediction:
     # Ensemble részletek
     model_agreement: float = 0.0  # Modellek közötti egyetértés (0-1)
     prediction_quality: str = ""   # "magas" / "közepes" / "alacsony"
+
+    # Szétválasztott confidence
+    betting_confidence: float = 0.0  # Fogadási megbízhatóság (szigorúbb)
+
+    # Single bet ajánlások
+    best_single_bet: dict = None     # Legjobb single tipp
+    best_value_single: dict = None   # Legjobb value single
 
     # H2H referencia
     h2h_data: HeadToHead | None = None
@@ -179,9 +195,9 @@ class PredictionEngine:
         self._calculate_gg_ng(pred)
         self._calculate_exact_scores(pred)
 
-        # === 2. MODELL: ELO ===
-        pred.elo_home, pred.elo_draw, pred.elo_away = elo_to_probabilities(
-            home_stats.elo_rating, away_stats.elo_rating
+        # === 2. MODELL: Strength Rating ===
+        pred.strength_home, pred.strength_draw, pred.strength_away = strength_to_probabilities(
+            home_stats.strength_rating, away_stats.strength_rating
         )
 
         # === 3. MODELL: Forma ===
@@ -189,18 +205,21 @@ class PredictionEngine:
             home_stats, away_stats
         )
 
-        # === ENSEMBLE KOMBINÁLÁS ===
+        # === ENSEMBLE KOMBINÁLÁS (per-market súlyokkal) ===
         self._ensemble_combine(pred, h2h)
+
+        # === PROBABILITY KALIBRÁCIÓ ===
+        self._calibrate_probabilities(pred)
 
         # Statisztikai O/U ráták
         self._calculate_statistical_ou(pred)
 
-        # Value bet elemzés
+        # Value bet elemzés (kalibrált valószínűségekből)
         if odds:
             self._find_value_bets(pred, odds)
             self._find_stat_value_bets(pred, odds)
 
-        # Konfidencia és ajánlás
+        # Konfidencia (prediction + betting külön)
         self._calculate_confidence(pred)
         self._generate_recommendation(pred, odds)
 
@@ -392,34 +411,34 @@ class PredictionEngine:
         # Súlyozott: 60% utolsó 5, 40% hazai/vendég specifikus
         return recent_ppg * 0.6 + specific_ppg * 0.4
 
-    # === Ensemble ===
+    # === Ensemble (per-market súlyok) ===
 
     def _ensemble_combine(
         self,
         pred: MatchPrediction,
         h2h: HeadToHead | None,
     ):
-        """Modellek kombinálása súlyozott átlaggal."""
-        w = ENSEMBLE_WEIGHTS
+        """Modellek kombinálása per-market súlyokkal."""
+        w = ENSEMBLE_WEIGHTS_1X2
 
-        # H2H modell (ha van elég adat)
+        # H2H modell (ha van elég adat, recency-vel súlyozva)
         if h2h and h2h.matches_played >= 3:
             h2h_home = h2h.home_win_rate
             h2h_draw = h2h.draw_rate
             h2h_away = h2h.away_win_rate
         else:
-            # Ha nincs H2H, az ELO-nak adjuk a súlyt
-            h2h_home = pred.elo_home
-            h2h_draw = pred.elo_draw
-            h2h_away = pred.elo_away
+            # Ha nincs H2H, a strength-nek adjuk a súlyt
+            h2h_home = pred.strength_home
+            h2h_draw = pred.strength_draw
+            h2h_away = pred.strength_away
 
         # Stat modell (O/U trendekből)
         stat_home, stat_draw, stat_away = self._stats_based_1x2(pred)
 
-        # Súlyozott összeg
+        # Súlyozott összeg (1X2 per-market súlyokkal)
         models = [
             (pred.poisson_home, pred.poisson_draw, pred.poisson_away, w["poisson"]),
-            (pred.elo_home, pred.elo_draw, pred.elo_away, w["elo"]),
+            (pred.strength_home, pred.strength_draw, pred.strength_away, w["strength"]),
             (pred.form_home, pred.form_draw, pred.form_away, w["form"]),
             (h2h_home, h2h_draw, h2h_away, w["h2h"]),
             (stat_home, stat_draw, stat_away, w["stats"]),
@@ -436,17 +455,62 @@ class PredictionEngine:
             pred.draw_prob = combined_draw / total
             pred.away_win_prob = combined_away / total
 
-        # Modellek közötti egyetértés mérése
+        # Modellek közötti egyetértés - direction + magnitude
         all_home_probs = [h for h, _, _, _ in models]
         all_away_probs = [a for _, _, a, _ in models]
 
-        # Standard deviáció: alacsonyabb = nagyobb egyetértés
         if len(all_home_probs) > 1:
             home_std = np.std(all_home_probs)
             away_std = np.std(all_away_probs)
             avg_std = (home_std + away_std) / 2
-            # 0 std = tökéletes egyetértés (1.0), 0.2+ std = rossz (0.0)
             pred.model_agreement = max(0.0, 1.0 - avg_std * 5)
+
+    # === Probability Kalibráció ===
+
+    def _calibrate_probabilities(self, pred: MatchPrediction):
+        """Szélsőséges valószínűségek visszahúzása a realitás felé.
+
+        Shrinkage: húzza a valószínűségeket az átlag felé, csökkenti az
+        overconfidence-t. A piac baseline: H=0.45, D=0.27, A=0.28.
+        """
+        baseline = {"home": 0.45, "draw": 0.27, "away": 0.28}
+        s = CALIBRATION_SHRINKAGE
+
+        # 1X2 shrinkage
+        pred.home_win_prob = pred.home_win_prob * (1 - s) + baseline["home"] * s
+        pred.draw_prob = pred.draw_prob * (1 - s) + baseline["draw"] * s
+        pred.away_win_prob = pred.away_win_prob * (1 - s) + baseline["away"] * s
+
+        # Clamp szélsőséges értékek
+        pred.home_win_prob = max(CALIBRATION_MIN_PROB, min(CALIBRATION_MAX_PROB, pred.home_win_prob))
+        pred.draw_prob = max(CALIBRATION_MIN_PROB, min(CALIBRATION_MAX_PROB, pred.draw_prob))
+        pred.away_win_prob = max(CALIBRATION_MIN_PROB, min(CALIBRATION_MAX_PROB, pred.away_win_prob))
+
+        # Normalizálás
+        total = pred.home_win_prob + pred.draw_prob + pred.away_win_prob
+        if total > 0:
+            pred.home_win_prob /= total
+            pred.draw_prob /= total
+            pred.away_win_prob /= total
+
+        # O/U kalibráció (shrinkage 50% felé)
+        ou_baseline = 0.50
+        for attr_o, attr_u in [
+            ("over15_prob", "under15_prob"),
+            ("over25_prob", "under25_prob"),
+            ("over35_prob", "under35_prob"),
+        ]:
+            over_val = getattr(pred, attr_o)
+            calibrated = over_val * (1 - s) + ou_baseline * s
+            calibrated = max(CALIBRATION_MIN_PROB, min(CALIBRATION_MAX_PROB, calibrated))
+            setattr(pred, attr_o, calibrated)
+            setattr(pred, attr_u, 1.0 - calibrated)
+
+        # GG/NG kalibráció
+        gg_baseline = 0.48
+        pred.gg_prob = pred.gg_prob * (1 - s) + gg_baseline * s
+        pred.gg_prob = max(CALIBRATION_MIN_PROB, min(CALIBRATION_MAX_PROB, pred.gg_prob))
+        pred.ng_prob = 1.0 - pred.gg_prob
 
     def _stats_based_1x2(
         self, pred: MatchPrediction
@@ -649,7 +713,7 @@ class PredictionEngine:
     # === Value Bet Elemzés ===
 
     def _find_value_bets(self, pred: MatchPrediction, odds: MatchOdds):
-        """Poisson value bet azonosítás (11 piac)."""
+        """Value bet azonosítás - kalibrált valószínűségekből, szigorú szűrőkkel."""
         pred.value_bets = []
 
         markets = [
@@ -667,15 +731,25 @@ class PredictionEngine:
         ]
 
         for name, our_prob, market_odds in markets:
-            if market_odds <= 1.0 or our_prob <= 0:
+            # Szigorú szűrők
+            if market_odds < VALUE_BET_MIN_ODDS or market_odds > VALUE_BET_MAX_ODDS:
+                continue
+            if our_prob <= 0:
                 continue
 
             implied_prob = 1.0 / market_odds
             edge = our_prob - implied_prob
 
-            if edge > VALUE_BET_THRESHOLD:
-                # Konfidencia szorzó: magasabb model_agreement = erősebb value bet
-                quality_mult = 0.8 + pred.model_agreement * 0.2
+            if edge > VALUE_BET_MIN_EDGE:
+                ev = our_prob * market_odds - 1.0
+                quality = 0.8 + pred.model_agreement * 0.2
+
+                # Warning flag: magas edge de alacsony confidence
+                warning = ""
+                if edge > 0.15 and pred.betting_confidence < 0.50:
+                    warning = "magas_edge_alacsony_conf"
+                elif pred.model_agreement < 0.40:
+                    warning = "gyenge_egyetertes"
 
                 pred.value_bets.append({
                     "market": name,
@@ -683,8 +757,9 @@ class PredictionEngine:
                     "implied_prob": implied_prob,
                     "odds": market_odds,
                     "edge": edge,
-                    "expected_value": our_prob * market_odds - 1.0,
-                    "quality": quality_mult,
+                    "expected_value": ev,
+                    "quality": quality,
+                    "warning": warning,
                 })
 
         pred.value_bets.sort(key=lambda x: x["edge"] * x.get("quality", 1.0), reverse=True)
@@ -723,10 +798,10 @@ class PredictionEngine:
     # === Konfidencia és Ajánlás ===
 
     def _calculate_confidence(self, pred: MatchPrediction):
-        """Összesített konfidencia számítás - multi-faktor."""
+        """Prediction confidence + Betting confidence külön számítás."""
         max_prob = max(pred.home_win_prob, pred.draw_prob, pred.away_win_prob)
 
-        # Adatminőség faktor
+        # === Prediction Confidence ===
         data_quality = 1.0
         if pred.home_stats:
             if pred.home_stats.matches_played < 5:
@@ -739,10 +814,8 @@ class PredictionEngine:
             elif pred.away_stats.matches_played < 10:
                 data_quality *= 0.85
 
-        # Modellek egyetértése
         agreement_factor = 0.85 + pred.model_agreement * 0.15
 
-        # Konzisztencia faktor
         consistency_factor = 1.0
         if pred.home_stats and pred.away_stats:
             avg_consistency = (
@@ -750,14 +823,30 @@ class PredictionEngine:
                 pred.away_stats.scoring_consistency
             ) / 2
             if avg_consistency > 1.5:
-                consistency_factor = 0.92  # Inkonzisztens csapatok = kevésbé kiszámítható
+                consistency_factor = 0.92
 
         pred.confidence = max_prob * data_quality * agreement_factor * consistency_factor
 
+        # === Betting Confidence (szigorúbb) ===
+        # A betting confidence figyelembe veszi hogy a piac ellen fogadunk-e
+        betting_base = pred.confidence * 0.85  # Alapból konzervatívabb
+
+        # Ha van odds adat, a piaci implied prob is számít
+        if pred.match_odds and pred.match_odds.home_win > 0:
+            # Mennyire tér el a modellünk a piactól
+            market_home = 1.0 / pred.match_odds.home_win if pred.match_odds.home_win > 1 else 0.33
+            market_away = 1.0 / pred.match_odds.away_win if pred.match_odds.away_win > 1 else 0.33
+            model_diff = abs(pred.home_win_prob - market_home) + abs(pred.away_win_prob - market_away)
+            # Ha nagyon eltérünk a piactól, csökkentjük a betting confidence-t
+            market_penalty = max(0.7, 1.0 - model_diff * 0.5)
+            betting_base *= market_penalty
+
+        pred.betting_confidence = min(pred.confidence, betting_base)
+
         # Predikció minőség besorolás
-        if pred.confidence >= 0.65 and pred.model_agreement >= 0.7:
+        if pred.confidence >= 0.60 and pred.model_agreement >= 0.65:
             pred.prediction_quality = "magas"
-        elif pred.confidence >= 0.50:
+        elif pred.confidence >= 0.45:
             pred.prediction_quality = "közepes"
         else:
             pred.prediction_quality = "alacsony"
@@ -765,41 +854,62 @@ class PredictionEngine:
     def _generate_recommendation(
         self, pred: MatchPrediction, odds: MatchOdds | None
     ):
-        """Legjobb fogadási ajánlás generálása."""
-        # Ha van value bet, azt ajánljuk
-        if pred.value_bets:
-            best = pred.value_bets[0]
-            pred.recommended_bet = best["market"]
-            pred.recommended_odds = best["odds"]
-            return
+        """Legjobb fogadási ajánlás + single bet ajánlások."""
+        all_options = []
 
-        # Ha van stat value bet
-        if pred.stat_value_bets:
-            best = pred.stat_value_bets[0]
-            pred.recommended_bet = best["market"]
-            pred.recommended_odds = best["odds"]
-            return
-
-        # Legnagyobb valószínűségű kimenetel
-        options = [
+        # 1X2 opciók
+        _1x2 = [
             ("1 (Hazai)", pred.home_win_prob, odds.home_win if odds else 0),
             ("X (Döntetlen)", pred.draw_prob, odds.draw if odds else 0),
             ("2 (Vendég)", pred.away_win_prob, odds.away_win if odds else 0),
         ]
+        all_options.extend(_1x2)
 
-        if pred.over25_prob > 0.60:
-            options.append(
-                ("Over 2.5", pred.over25_prob, odds.over_25 if odds else 0)
-            )
-        if pred.under25_prob > 0.60:
-            options.append(
-                ("Under 2.5", pred.under25_prob, odds.under_25 if odds else 0)
-            )
-        if pred.gg_prob > 0.60:
-            options.append(("GG", pred.gg_prob, odds.gg if odds else 0))
-        if pred.ng_prob > 0.60:
-            options.append(("NG", pred.ng_prob, odds.ng if odds else 0))
+        # O/U opciók
+        if odds:
+            for name, prob, o in [
+                ("Over 2.5", pred.over25_prob, odds.over_25),
+                ("Under 2.5", pred.under25_prob, odds.under_25),
+                ("GG", pred.gg_prob, odds.gg),
+                ("NG", pred.ng_prob, odds.ng),
+            ]:
+                if prob > 0.40 and o > 1.0:
+                    all_options.append((name, prob, o))
 
-        best = max(options, key=lambda x: x[1])
-        pred.recommended_bet = best[0]
-        pred.recommended_odds = best[2]
+        # Legjobb overall tipp
+        if pred.value_bets:
+            best = pred.value_bets[0]
+            pred.recommended_bet = best["market"]
+            pred.recommended_odds = best["odds"]
+        elif pred.stat_value_bets:
+            best = pred.stat_value_bets[0]
+            pred.recommended_bet = best["market"]
+            pred.recommended_odds = best["odds"]
+        else:
+            best = max(all_options, key=lambda x: x[1])
+            pred.recommended_bet = best[0]
+            pred.recommended_odds = best[2]
+
+        # === Single Bet ajánlások ===
+        # Best single: legmagasabb prob * odds score
+        valid_singles = [(n, p, o) for n, p, o in all_options if o > 1.0]
+        if valid_singles:
+            # Legjobb single (legmagasabb valószínűség, biztonságos)
+            best_single = max(valid_singles, key=lambda x: x[1])
+            pred.best_single_bet = {
+                "market": best_single[0],
+                "prob": best_single[1],
+                "odds": best_single[2],
+                "ev": best_single[1] * best_single[2] - 1.0,
+            }
+
+            # Legjobb value single (legjobb EV)
+            best_value = max(valid_singles, key=lambda x: x[1] * x[2] - 1.0)
+            ev = best_value[1] * best_value[2] - 1.0
+            if ev > 0:
+                pred.best_value_single = {
+                    "market": best_value[0],
+                    "prob": best_value[1],
+                    "odds": best_value[2],
+                    "ev": ev,
+                }

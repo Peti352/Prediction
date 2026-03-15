@@ -9,10 +9,11 @@ import math
 from dataclasses import dataclass, field
 
 from src.config import (
-    ELO_DEFAULT_RATING,
-    ELO_HOME_ADVANTAGE,
-    ELO_K_FACTOR,
+    STRENGTH_DEFAULT_RATING,
+    STRENGTH_HOME_ADVANTAGE,
+    STRENGTH_K_FACTOR,
     TIME_DECAY_FACTOR,
+    H2H_RECENCY_DECAY,
 )
 
 
@@ -82,7 +83,7 @@ class TeamStats:
     match_goals_history: list[int] = field(default_factory=list)
 
     # ELO rating
-    elo_rating: float = ELO_DEFAULT_RATING
+    strength_rating: float = STRENGTH_DEFAULT_RATING
 
     # Haladó statisztikák
     scoring_consistency: float = 0.0   # Gólszerzés konzisztenciája (alacsonyabb szórás = jobb)
@@ -133,13 +134,13 @@ class LeagueAverages:
 
 # === ELO Rating Rendszer ===
 
-def elo_expected_score(rating_a: float, rating_b: float, home_advantage: float = ELO_HOME_ADVANTAGE) -> float:
+def strength_expected_score(rating_a: float, rating_b: float, home_advantage: float = STRENGTH_HOME_ADVANTAGE) -> float:
     """Várható eredmény ELO alapján (0.0 - 1.0)."""
     dr = rating_a - rating_b + home_advantage
     return 1.0 / (10.0 ** (-dr / 400.0) + 1.0)
 
 
-def elo_goal_diff_multiplier(goal_diff: int) -> float:
+def strength_goal_diff_multiplier(goal_diff: int) -> float:
     """Gólkülönbség szorzó az ELO frissítéshez."""
     gd = abs(goal_diff)
     if gd <= 1:
@@ -152,29 +153,29 @@ def elo_goal_diff_multiplier(goal_diff: int) -> float:
         return 1.75 + (gd - 3) / 8.0
 
 
-def elo_update(
+def strength_update(
     rating: float,
     expected: float,
     actual: float,
     goal_diff: int,
-    k_factor: float = ELO_K_FACTOR,
+    k_factor: float = STRENGTH_K_FACTOR,
 ) -> float:
     """ELO rating frissítés egy meccs alapján."""
-    g = elo_goal_diff_multiplier(goal_diff)
+    g = strength_goal_diff_multiplier(goal_diff)
     return rating + k_factor * g * (actual - expected)
 
 
-def elo_to_probabilities(
+def strength_to_probabilities(
     home_elo: float,
     away_elo: float,
-    home_advantage: float = ELO_HOME_ADVANTAGE,
+    home_advantage: float = STRENGTH_HOME_ADVANTAGE,
 ) -> tuple[float, float, float]:
     """ELO ratingekből 1X2 valószínűségek.
 
     Returns:
         (home_win_prob, draw_prob, away_win_prob)
     """
-    we_home = elo_expected_score(home_elo, away_elo, home_advantage)
+    we_home = strength_expected_score(home_elo, away_elo, home_advantage)
     we_away = 1.0 - we_home
 
     # Döntetlen valószínűség becslése az ELO különbségből
@@ -191,11 +192,11 @@ def elo_to_probabilities(
     return home_win / total, draw_prob / total, away_win / total
 
 
-def calculate_team_elo(
+def calculate_team_strength(
     team_id: int | None,
     team_name: str,
     matches: list[dict],
-    initial_rating: float = ELO_DEFAULT_RATING,
+    initial_rating: float = STRENGTH_DEFAULT_RATING,
 ) -> float:
     """Csapat ELO ratingjének kiszámítása a meccs történetből.
 
@@ -233,10 +234,10 @@ def calculate_team_elo(
 
         if is_home:
             scored, conceded = hg, ag
-            advantage = ELO_HOME_ADVANTAGE
+            advantage = STRENGTH_HOME_ADVANTAGE
         else:
             scored, conceded = ag, hg
-            advantage = -ELO_HOME_ADVANTAGE
+            advantage = -STRENGTH_HOME_ADVANTAGE
 
         # Eredmény (1=win, 0.5=draw, 0=loss)
         if scored > conceded:
@@ -249,8 +250,8 @@ def calculate_team_elo(
         goal_diff = scored - conceded
         # Az ellenfél ratingjét nem tudjuk pontosan, átlagot használunk
         opponent_rating = initial_rating
-        expected = elo_expected_score(rating, opponent_rating, advantage)
-        rating = elo_update(rating, expected, actual, abs(goal_diff))
+        expected = strength_expected_score(rating, opponent_rating, advantage)
+        rating = strength_update(rating, expected, actual, abs(goal_diff))
 
     return rating
 
@@ -485,7 +486,7 @@ def calculate_team_stats(
         stats.avg_away_goals_conceded = stats.away_goals_conceded / stats.away_matches
 
     # ELO rating számítás
-    stats.elo_rating = calculate_team_elo(team_id, team_name, matches)
+    stats.strength_rating = calculate_team_strength(team_id, team_name, matches)
 
     return stats
 

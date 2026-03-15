@@ -1,7 +1,7 @@
 """Szelvény generátor - fogadási szelvény összeállítás.
 
 A predikciók alapján összeállítja a legjobb szelvényjavaslatokat:
-- Biztos szelvény (alacsony odds, magas konfidencia)
+- Konzervatív szelvény (alacsony odds, magas konfidencia)
 - Value szelvény (Poisson value betek)
 - Stat Value szelvény (statisztikai O/U alapú)
 - Rizikós szelvény (magasabb odds, nagyobb nyeremény)
@@ -17,7 +17,7 @@ from src.config import (
     TICKET_MAX_MATCHES,
     TICKET_MIN_MATCHES,
     TICKET_RISKY_MIN_ODDS,
-    TICKET_SAFE_MAX_ODDS,
+    TICKET_CONSERVATIVE_MAX_ODDS,
 )
 
 
@@ -68,7 +68,7 @@ class TicketGenerator:
 
         tickets = []
 
-        # 1) Biztos szelvény
+        # 1) Konzervatív szelvény
         safe = self._generate_safe_ticket(predictions)
         if safe and len(safe.entries) >= TICKET_MIN_MATCHES:
             tickets.append(safe)
@@ -99,8 +99,8 @@ class TicketGenerator:
     def _generate_safe_ticket(
         self, predictions: list[MatchPrediction]
     ) -> Ticket:
-        """Biztos szelvény: magas konfidencia, alacsonyabb oddsok."""
-        ticket = Ticket(name="Biztos szelvény", stake=1000)
+        """Konzervatív szelvény: magas konfidencia, alacsonyabb oddsok."""
+        ticket = Ticket(name="Konzervatív szelvény", stake=1000)
         candidates = []
 
         for pred in predictions:
@@ -209,7 +209,7 @@ class TicketGenerator:
         safe = [
             o for o in options
             if o.probability >= MIN_CONFIDENCE
-            and 1.01 < o.odds <= TICKET_SAFE_MAX_ODDS
+            and 1.01 < o.odds <= TICKET_CONSERVATIVE_MAX_ODDS
         ]
         if not safe:
             safe = [o for o in options if o.probability >= MIN_CONFIDENCE + 0.15]

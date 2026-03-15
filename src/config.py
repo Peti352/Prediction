@@ -1,6 +1,6 @@
-"""Konfigurációs beállítások a TipMix Prediction System v2-höz.
+"""Konfigurációs beállítások a TipMix Prediction System v3-höz.
 
-Sofascore (meccs statisztikák) + The Odds API (oddsok) + TippmixPro (fallback).
+Sofascore (meccs statisztikák) + The Odds API (oddsok) + football-data.org (fallback).
 """
 
 import os
@@ -55,34 +55,64 @@ POISSON_MAX_GOALS = 7      # Poisson eloszlás max gól
 MIN_CONFIDENCE = 0.55      # Minimum konfidencia szelvényhez
 VALUE_BET_THRESHOLD = 0.05 # Minimum edge a value bet-hez (5%)
 
-# === ELO beállítások ===
-ELO_DEFAULT_RATING = 1500  # Alapértelmezett ELO rating
-ELO_K_FACTOR = 30          # Liga meccsek K-faktor
-ELO_HOME_ADVANTAGE = 100   # Hazai pálya ELO előny
+# === Strength Rating beállítások (korábban "ELO") ===
+# Rövid távú erősségmutató 20 meccsből, NEM valódi ELO
+STRENGTH_DEFAULT_RATING = 1500
+STRENGTH_K_FACTOR = 30
+STRENGTH_HOME_ADVANTAGE = 100
 
 # === Dixon-Coles beállítások ===
 DIXON_COLES_RHO = -0.13    # Alacsony gólszámú korrelációs faktor
 
-# === Ensemble súlyok ===
-ENSEMBLE_WEIGHTS = {
-    "poisson": 0.35,       # Poisson/Dixon-Coles modell
-    "elo": 0.25,           # ELO alapú valószínűségek
+# === Ensemble súlyok (piac-specifikus) ===
+# 1X2 piaci súlyok
+ENSEMBLE_WEIGHTS_1X2 = {
+    "poisson": 0.40,       # Dixon-Coles modell (1X2-re a legerősebb)
+    "strength": 0.25,      # Erősség rating
     "form": 0.20,          # Forma alapú becslés
-    "h2h": 0.10,           # Head-to-head történet
-    "stats": 0.10,         # Statisztikai O/U trendek
+    "h2h": 0.05,           # H2H (kis súly - zajos, kis minta)
+    "stats": 0.10,         # Statisztikai trendek
 }
+
+# Over/Under piaci súlyok
+ENSEMBLE_WEIGHTS_OU = {
+    "poisson": 0.45,       # Dixon-Coles (gól piacon a legerősebb)
+    "stats": 0.30,         # Stat O/U ráták (itt fontos)
+    "form": 0.15,          # Forma
+    "strength": 0.10,      # Erősség rating
+}
+
+# GG/NG piaci súlyok
+ENSEMBLE_WEIGHTS_GGNG = {
+    "poisson": 0.40,       # Dixon-Coles
+    "stats": 0.35,         # GG/NG stat ráták
+    "form": 0.15,          # Forma
+    "strength": 0.10,      # Erősség rating
+}
+
+# === Probability Calibration (shrinkage) ===
+# Szélsőséges valószínűségek visszahúzása a realitás felé
+CALIBRATION_SHRINKAGE = 0.12  # 12% shrinkage az átlag felé
+CALIBRATION_MIN_PROB = 0.03   # Minimum 3% bármely kimenetelre
+CALIBRATION_MAX_PROB = 0.92   # Maximum 92% bármely kimenetelre
 
 # === Időszúlyozás ===
 TIME_DECAY_FACTOR = 0.05   # Exponenciális súlycsökkenés régebbi meccsekre
+H2H_RECENCY_DECAY = 0.10   # H2H meccsek időbeli súlycsökkenése
+
+# === Value Bet szűrők (szigorúbb) ===
+VALUE_BET_MIN_ODDS = 1.25       # Minimum odds value bethez
+VALUE_BET_MAX_ODDS = 8.00       # Maximum odds (túl magas = gyanús)
+VALUE_BET_MIN_CONFIDENCE = 0.45 # Minimum betting confidence
+VALUE_BET_MIN_EDGE = 0.05       # Minimum calibrated edge (5%)
 
 # === Szelvény beállítások ===
 TICKET_MIN_MATCHES = 3
-TICKET_MAX_MATCHES = 8
-TICKET_SAFE_MAX_ODDS = 1.60     # "Biztos" tipp max odds
-TICKET_RISKY_MIN_ODDS = 2.50    # "Rizikós" tipp min odds
+TICKET_MAX_MATCHES = 6       # Csökkentve 8-ról (rövidebb kombik jobbak)
+TICKET_CONSERVATIVE_MAX_ODDS = 1.60  # Konzervatív tipp max odds
+TICKET_RISKY_MIN_ODDS = 2.50         # Rizikós tipp min odds
 
 # === Támogatott ligák ===
-# Minden ligánál: Sofascore tournament ID + The Odds API sport key
 SUPPORTED_LEAGUES = {
     "PL": {
         "name": "Premier League",
@@ -123,7 +153,6 @@ ODDS_API_KEY_TO_LEAGUE = {
 
 # === Ismert csapatnév eltérések (Sofascore ↔ Odds API manuális mapping) ===
 KNOWN_NAME_MAPPINGS = {
-    # Sofascore név → Odds API név (ahol a fuzzy match nem működik)
     "Wolverhampton": "Wolverhampton Wanderers",
     "Wolves": "Wolverhampton Wanderers",
     "Nottingham Forest": "Nottingham Forest",
@@ -166,15 +195,10 @@ FUZZY_MATCH_THRESHOLD = 0.65
 
 
 def fuzzy_match_teams(name1: str, name2: str) -> float:
-    """Két csapatnév hasonlóságát számítja ki (0.0 - 1.0).
-
-    Először a KNOWN_NAME_MAPPINGS-ben keres, utána fuzzy matching.
-    """
-    # Exact match
+    """Két csapatnév hasonlóságát számítja ki (0.0 - 1.0)."""
     if name1.lower() == name2.lower():
         return 1.0
 
-    # Known mapping
     mapped = KNOWN_NAME_MAPPINGS.get(name1, "")
     if mapped.lower() == name2.lower():
         return 1.0
@@ -182,7 +206,6 @@ def fuzzy_match_teams(name1: str, name2: str) -> float:
     if mapped.lower() == name1.lower():
         return 1.0
 
-    # Fuzzy match
     return SequenceMatcher(
         None, name1.lower(), name2.lower()
     ).ratio()
@@ -191,11 +214,7 @@ def fuzzy_match_teams(name1: str, name2: str) -> float:
 def find_best_match(
     name: str, candidates: list[str], threshold: float = FUZZY_MATCH_THRESHOLD
 ) -> str | None:
-    """Megkeresi a legjobb egyezést a jelöltek között.
-
-    Returns:
-        A legjobb egyező név, vagy None ha nincs elég jó egyezés.
-    """
+    """Megkeresi a legjobb egyezést a jelöltek között."""
     best_score = 0.0
     best_match = None
 

@@ -61,7 +61,7 @@ def format_daily_report(result: PipelineResult) -> str:
 
     lines = [
         "*TIPMIX PREDICTION SYSTEM v3*",
-        "*Ensemble: Dixon\\-Coles \\+ ELO \\+ Forma*",
+        "*Ensemble: Kalibrált Ensemble*",
         f"_{escape_md(result.timestamp.strftime('%Y.%m.%d %H:%M'))}_",
         "",
         f"Elemzett meccsek: *{result.total_matches}*",
@@ -227,9 +227,9 @@ def _format_prediction_short(pred: MatchPrediction) -> str:
 
     # ELO info
     if pred.home_stats and pred.away_stats:
-        home_elo = escape_md(f"{pred.home_stats.elo_rating:.0f}")
-        away_elo = escape_md(f"{pred.away_stats.elo_rating:.0f}")
-        lines.append(f"   ELO: {home_elo} vs {away_elo}")
+        home_elo = escape_md(f"{pred.home_stats.strength_rating:.0f}")
+        away_elo = escape_md(f"{pred.away_stats.strength_rating:.0f}")
+        lines.append(f"   STR: {home_elo} vs {away_elo}")
 
     # Value betek jelölése
     if pred.value_bets:

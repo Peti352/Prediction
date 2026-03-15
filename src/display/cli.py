@@ -1,6 +1,6 @@
 """Rich CLI megjelenítés - szép terminál kimenet a predikciókhoz.
 
-Bővítve: Ensemble modell részletek, ELO ratingek, H2H elemzés,
+Bővítve: Kalibrált ensemble, Strength rating, H2H elemzés,
 O/U összehasonlító tábla (stat% vs odds).
 """
 
@@ -22,7 +22,7 @@ def print_header():
     console.print(
         Panel.fit(
             "[bold cyan]TIPMIX PREDICTION SYSTEM v3[/bold cyan]\n"
-            "[dim]Ensemble: Dixon-Coles + ELO + Forma | 20 meccs mélyelemzés[/dim]",
+            "[dim]Ensemble: Dixon-Coles + Strength + Forma | Kalibrált | 20 meccs mélyelemzés[/dim]",
             border_style="cyan",
         )
     )
@@ -186,14 +186,14 @@ def print_detailed_prediction(pred: MatchPrediction):
     )
     lines.append("")
 
-    # ELO Ratingek
+    # Strength Ratingek
     if pred.home_stats and pred.away_stats:
-        home_elo = pred.home_stats.elo_rating
-        away_elo = pred.away_stats.elo_rating
+        home_elo = pred.home_stats.strength_rating
+        away_elo = pred.away_stats.strength_rating
         elo_diff = home_elo - away_elo
         elo_color = "green" if elo_diff > 50 else "red" if elo_diff < -50 else "yellow"
         lines.append(
-            f"[bold]ELO Rating:[/bold] "
+            f"[bold]Strength Rating:[/bold] "
             f"{pred.home_team}: [bold]{home_elo:.0f}[/bold]  |  "
             f"{pred.away_team}: [bold]{away_elo:.0f}[/bold]  "
             f"([{elo_color}]{elo_diff:+.0f}[/{elo_color}])"
@@ -222,7 +222,7 @@ def print_detailed_prediction(pred: MatchPrediction):
         f"  Dixon-Coles: {pred.poisson_home:.0%} / {pred.poisson_draw:.0%} / {pred.poisson_away:.0%}"
     )
     lines.append(
-        f"  ELO:         {pred.elo_home:.0%} / {pred.elo_draw:.0%} / {pred.elo_away:.0%}"
+        f"  STR:         {pred.elo_home:.0%} / {pred.elo_draw:.0%} / {pred.elo_away:.0%}"
     )
     lines.append(
         f"  Forma:       {pred.form_home:.0%} / {pred.form_draw:.0%} / {pred.form_away:.0%}"
@@ -333,7 +333,7 @@ def print_detailed_prediction(pred: MatchPrediction):
             f"Utolsó 5: {_colorize_form(hs.recent_form_5)}"
         )
         lines.append(
-            f"  ELO: {hs.elo_rating:.0f}  "
+            f"  STR: {hs.strength_rating:.0f}  "
             f"Pos: {hs.league_position}  "
             f"Gól avg: {hs.avg_goals_scored:.1f} (súlyozott: {hs.weighted_avg_goals_scored:.1f})"
         )
@@ -360,7 +360,7 @@ def print_detailed_prediction(pred: MatchPrediction):
             f"Utolsó 5: {_colorize_form(as_.recent_form_5)}"
         )
         lines.append(
-            f"  ELO: {as_.elo_rating:.0f}  "
+            f"  STR: {as_.strength_rating:.0f}  "
             f"Pos: {as_.league_position}  "
             f"Gól avg: {as_.avg_goals_scored:.1f} (súlyozott: {as_.weighted_avg_goals_scored:.1f})"
         )
