@@ -29,6 +29,7 @@ except ImportError:
 from src.config import (
     CACHE_DIR,
     CACHE_TTL_HOURS,
+    EXCLUDED_KEYWORDS,
     REQUEST_TIMEOUT,
     SOFASCORE_BASE_URL,
     SOFASCORE_REQUEST_DELAY,
@@ -215,6 +216,7 @@ class SofascoreClient:
         logger.info("Sofascore összes event: %d", len(data["events"]))
 
         matches = []
+        skipped_youth = 0
         for event in data["events"]:
             tournament = event.get("tournament", {})
             unique_tournament = tournament.get("uniqueTournament", {})
@@ -228,6 +230,15 @@ class SofascoreClient:
             home_team = event.get("homeTeam", {})
             away_team = event.get("awayTeam", {})
 
+            # Utánpótlás / barátságos / női meccsek szűrése
+            tournament_name = unique_tournament.get("name", "")
+            home_name = home_team.get("name", "")
+            away_name = away_team.get("name", "")
+            all_names = f"{tournament_name} {home_name} {away_name}"
+            if any(kw.lower() in all_names.lower() for kw in EXCLUDED_KEYWORDS):
+                skipped_youth += 1
+                continue
+
             matches.append({
                 "event_id": event.get("id"),
                 "home_team": home_team.get("name", ""),
@@ -240,6 +251,8 @@ class SofascoreClient:
                 "start_timestamp": event.get("startTimestamp", 0),
             })
 
+        if skipped_youth > 0:
+            logger.info("Kiszűrt utánpótlás/barátságos: %d", skipped_youth)
         logger.info("Támogatott ligák meccsek: %d", len(matches))
         return matches
 

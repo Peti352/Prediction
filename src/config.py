@@ -106,38 +106,138 @@ VALUE_BET_MAX_ODDS = 8.00       # Maximum odds (túl magas = gyanús)
 VALUE_BET_MIN_CONFIDENCE = 0.45 # Minimum betting confidence
 VALUE_BET_MIN_EDGE = 0.05       # Minimum calibrated edge (5%)
 
+# === Odds szűrők (alacsony odds tippek kiszűrése) ===
+MIN_ODDS_SINGLE = 1.50          # Minimum odds single tipphez
+MIN_ODDS_COMBO = 1.30           # Minimum odds kombi tételhez
+MIN_ODDS_VALUE = 1.70           # Minimum odds value bethez
+MIN_ODDS_DISPLAY = 1.25         # Minimum odds megjelenítéshez
+
 # === Szelvény beállítások ===
 TICKET_MIN_MATCHES = 3
 TICKET_MAX_MATCHES = 6       # Csökkentve 8-ról (rövidebb kombik jobbak)
 TICKET_CONSERVATIVE_MAX_ODDS = 1.60  # Konzervatív tipp max odds
 TICKET_RISKY_MIN_ODDS = 2.50         # Rizikós tipp min odds
 
+# === Adatminőség szűrők ===
+MIN_MATCHES_FOR_PREDICTION = 5  # Minimum meccs történet predikcióhoz
+MIN_MATCHES_FOR_CONFIDENCE = 10 # Minimum meccs magas konfidenciához
+
+# === Meccs szűrők ===
+EXCLUDED_KEYWORDS = [
+    "U17", "U18", "U19", "U20", "U21", "U23",
+    "Reserve", "Reserves", "Youth", "Academy",
+    "Women", "Frauen", "Femmes", "Femenino", "Feminino",
+    "Friendly", "Club Friendly",
+    "Amateur", "Amateure",
+]
+
 # === Támogatott ligák ===
+# Top ligák (magas adatminőség) + másodvonalbeli ligák
 SUPPORTED_LEAGUES = {
+    # === Top 5 liga (high quality) ===
     "PL": {
         "name": "Premier League",
         "sofascore_tournament_id": 17,
         "odds_api_sport_key": "soccer_epl",
+        "quality": "high",
     },
     "BL1": {
         "name": "Bundesliga",
         "sofascore_tournament_id": 35,
         "odds_api_sport_key": "soccer_germany_bundesliga",
+        "quality": "high",
     },
     "SA": {
         "name": "Serie A",
         "sofascore_tournament_id": 23,
         "odds_api_sport_key": "soccer_italy_serie_a",
+        "quality": "high",
     },
     "PD": {
         "name": "La Liga",
         "sofascore_tournament_id": 8,
         "odds_api_sport_key": "soccer_spain_la_liga",
+        "quality": "high",
     },
     "FL1": {
         "name": "Ligue 1",
         "sofascore_tournament_id": 34,
         "odds_api_sport_key": "soccer_france_ligue_one",
+        "quality": "high",
+    },
+    # === Erős másodvonalbeli ligák (medium quality) ===
+    "PPL": {
+        "name": "Primeira Liga",
+        "sofascore_tournament_id": 238,
+        "odds_api_sport_key": "soccer_portugal_primeira_liga",
+        "quality": "medium",
+    },
+    "ERE": {
+        "name": "Eredivisie",
+        "sofascore_tournament_id": 37,
+        "odds_api_sport_key": "soccer_netherlands_eredivisie",
+        "quality": "medium",
+    },
+    "BEL": {
+        "name": "Belgian Pro League",
+        "sofascore_tournament_id": 38,
+        "odds_api_sport_key": "soccer_belgium_first_div",
+        "quality": "medium",
+    },
+    "TURK": {
+        "name": "Süper Lig",
+        "sofascore_tournament_id": 52,
+        "odds_api_sport_key": "soccer_turkey_super_league",
+        "quality": "medium",
+    },
+    "SCO": {
+        "name": "Scottish Premiership",
+        "sofascore_tournament_id": 36,
+        "odds_api_sport_key": "soccer_scotland_premiership",
+        "quality": "medium",
+    },
+    "ELC": {
+        "name": "Championship",
+        "sofascore_tournament_id": 18,
+        "odds_api_sport_key": "soccer_efl_champ",
+        "quality": "medium",
+    },
+    "BL2": {
+        "name": "2. Bundesliga",
+        "sofascore_tournament_id": 44,
+        "odds_api_sport_key": "soccer_germany_bundesliga2",
+        "quality": "medium",
+    },
+    "SER": {
+        "name": "Serie B",
+        "sofascore_tournament_id": 53,
+        "odds_api_sport_key": "soccer_italy_serie_b",
+        "quality": "medium",
+    },
+    "NB1": {
+        "name": "OTP Bank Liga",
+        "sofascore_tournament_id": 156,
+        "odds_api_sport_key": "soccer_hungary_nb1",
+        "quality": "medium",
+    },
+    # === Nemzetközi ===
+    "UCL": {
+        "name": "Champions League",
+        "sofascore_tournament_id": 7,
+        "odds_api_sport_key": "soccer_uefa_champs_league",
+        "quality": "high",
+    },
+    "UEL": {
+        "name": "Europa League",
+        "sofascore_tournament_id": 679,
+        "odds_api_sport_key": "soccer_uefa_europa_league",
+        "quality": "high",
+    },
+    "UECL": {
+        "name": "Conference League",
+        "sofascore_tournament_id": 17015,
+        "odds_api_sport_key": "soccer_uefa_europa_conference_league",
+        "quality": "medium",
     },
 }
 

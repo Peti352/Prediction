@@ -14,6 +14,9 @@ from operator import mul
 from src.analysis.predictor import MatchPrediction
 from src.config import (
     MIN_CONFIDENCE,
+    MIN_ODDS_COMBO,
+    MIN_ODDS_SINGLE,
+    MIN_ODDS_VALUE,
     TICKET_MAX_MATCHES,
     TICKET_MIN_MATCHES,
     TICKET_RISKY_MIN_ODDS,
@@ -204,15 +207,19 @@ class TicketGenerator:
         return ticket
 
     def _best_safe_entry(self, pred: MatchPrediction) -> TicketEntry | None:
-        """Legjobb biztos tipp egy meccshez."""
+        """Legjobb konzervatív tipp egy meccshez."""
         options = self._all_options(pred)
         safe = [
             o for o in options
             if o.probability >= MIN_CONFIDENCE
-            and 1.01 < o.odds <= TICKET_CONSERVATIVE_MAX_ODDS
+            and MIN_ODDS_COMBO <= o.odds <= TICKET_CONSERVATIVE_MAX_ODDS
         ]
         if not safe:
-            safe = [o for o in options if o.probability >= MIN_CONFIDENCE + 0.15]
+            safe = [
+                o for o in options
+                if o.probability >= MIN_CONFIDENCE + 0.15
+                and o.odds >= MIN_ODDS_COMBO
+            ]
         return max(safe, key=lambda e: e.confidence, default=None)
 
     def _best_risky_entry(self, pred: MatchPrediction) -> TicketEntry | None:
@@ -229,7 +236,7 @@ class TicketGenerator:
     def _best_overall_entry(self, pred: MatchPrediction) -> TicketEntry | None:
         """Legjobb általános tipp egy meccshez."""
         options = self._all_options(pred)
-        valid = [o for o in options if o.probability > 0.40]
+        valid = [o for o in options if o.probability > 0.40 and o.odds >= MIN_ODDS_COMBO]
         return max(valid, key=lambda e: e.confidence, default=None)
 
     def _all_options(self, pred: MatchPrediction) -> list[TicketEntry]:
