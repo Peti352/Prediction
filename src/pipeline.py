@@ -225,14 +225,22 @@ def _analyze_and_predict(
     # A megfelelő kliens kiválasztása a csapat meccsekhez
     match_client = _get_team_matches_client(data_source, sofascore)
 
+    # Fallback módban kevesebb meccset elemzünk (rate limit miatt)
+    is_fallback = data_source != "sofascore"
+    form_n = 10 if is_fallback else FORM_MATCHES
+    max_events = 15 if is_fallback else len(events)
+
+    if is_fallback and len(events) > max_events:
+        logger.info("Fallback mód: %d meccsből %d elemzése (rate limit)", len(events), max_events)
+        events = events[:max_events]
+
     for event in events:
         try:
-            # 20 meccs lekérdezése mélyelemzéshez
             home_matches = match_client.get_team_last_n_matches(
-                event.home_team_id, n=FORM_MATCHES
+                event.home_team_id, n=form_n
             )
             away_matches = match_client.get_team_last_n_matches(
-                event.away_team_id, n=FORM_MATCHES
+                event.away_team_id, n=form_n
             )
 
             league_code = event.league_code

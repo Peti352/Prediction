@@ -63,10 +63,10 @@ class FootballDataClient:
         return bool(self.api_key) and self.api_key != "your_key_here"
 
     def _rate_limit(self):
-        """10 req/perc = min 6 mp között."""
+        """10 req/perc - 2 mp szünet kérések között (burst engedélyezett)."""
         elapsed = time.time() - self._last_request_time
-        if elapsed < 6.5:
-            time.sleep(6.5 - elapsed)
+        if elapsed < 2.0:
+            time.sleep(2.0 - elapsed)
         self._last_request_time = time.time()
 
     def _cache_key(self, url: str, params: dict) -> str:
